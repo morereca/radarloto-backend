@@ -1,9 +1,9 @@
 import cron from 'node-cron';
 import { spawn } from 'child_process';
 
-const expression = process.env.RADARLOTO_CRON || '15 22 * * 2,4,5';
+const expression = process.env.RADARLOTO_CRON || '*/30 * * * *';
 console.log(`Cron activo con expresión: ${expression}`);
-console.log('Ejemplo por defecto: martes, jueves y viernes a las 22:15.');
+console.log('Ejemplo por defecto: cada 30 minutos.');
 
 function runJob() {
   console.log('[cron] Lanzando sync y evaluación...');

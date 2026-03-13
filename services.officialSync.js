@@ -1,27 +1,33 @@
-import * as cheerio from 'cheerio';
 import { db } from './db.js';
 import { nowIso } from './utils.js';
 
 const OFFICIAL_URLS = {
-  euromillones: 'https://www.loteriasyapuestas.es/es/resultados/euromillones',
-  primitiva: 'https://www.loteriasyapuestas.es/es/resultados/primitiva'
+  euromillones: 'https://www.loteriasyapuestas.es/es/euromillones/resultados/.formatoRSS',
+  primitiva: 'https://www.loteriasyapuestas.es/es/la-primitiva/resultados/.formatoRSS'
 };
 
 export async function syncOfficial(game) {
   const url = OFFICIAL_URLS[game];
   if (!url) throw new Error('Juego no soportado para sync oficial');
 
-  const res = await fetch(url, { headers: { 'user-agent': 'RadarLoto/1.0' } });
-  if (!res.ok) throw new Error(`No se pudo leer la fuente oficial: ${res.status}`);
+  const res = await fetch(url, {
+    headers: {
+      'user-agent': 'RadarLoto/2.0 (+https://radarloto-backend-production.up.railway.app)'
+    }
+  });
 
-  const html = await res.text();
-  const parsed = parseOfficialPage(game, html, url);
+  if (!res.ok) {
+    throw new Error(`No se pudo leer la fuente oficial: ${res.status}`);
+  }
+
+  const xml = await res.text();
+  const parsed = parseOfficialRss(game, xml);
 
   if (!parsed.length) {
     db.prepare(`
       INSERT INTO sync_runs (game, status, message, ran_at)
       VALUES (?, ?, ?, ?)
-    `).run(game, 'warning', 'No se pudieron extraer sorteos automáticamente. Revisa el adaptador.', nowIso());
+    `).run(game, 'warning', 'No se pudieron extraer sorteos desde el RSS oficial.', nowIso());
 
     return { processed: 0, inserted: 0, sourceUrl: url, warning: true };
   }
@@ -39,7 +45,7 @@ export async function syncOfficial(game) {
       draw.stars ? JSON.stringify(draw.stars) : null,
       draw.reintegro ?? null,
       url,
-      'SELAE',
+      'SELAE RSS',
       nowIso()
     );
     inserted += result.changes;
@@ -53,156 +59,164 @@ export async function syncOfficial(game) {
   return { processed: parsed.length, inserted, sourceUrl: url };
 }
 
-function parseOfficialPage(game, html, sourceUrl) {
-  const $ = cheerio.load(html);
-  const text = $('body').text().replace(/\s+/g, ' ').trim();
+function parseOfficialRss(game, xml) {
+  const items = [...xml.matchAll(/<item\b[\s\S]*?<\/item>/gi)]
+    .map((m) => m[0])
+    .map((itemXml) => parseItem(game, itemXml))
+    .filter(Boolean);
 
-  // 1) Intento por selectores "visuales" si la página los expone.
-  const selectorDraws = parseBySelectors(game, $);
-  if (selectorDraws.length) return selectorDraws;
-
-  // 2) Fallback robusto por ventanas de texto.
-  const windowDraws = parseByTextWindows(game, text);
-  if (windowDraws.length) return windowDraws;
-
-  // 3) Último recurso: intentar leer JSON incrustado.
-  return parseByEmbeddedJson(game, html);
-}
-
-function parseBySelectors(game, $) {
-  const draws = [];
   const seen = new Set();
-
-  const candidateBlocks = [
-    '[class*="resultado"]',
-    '[class*="draw"]',
-    '[class*="sorteo"]',
-    'article',
-    'section',
-    'li'
-  ];
-
-  for (const sel of candidateBlocks) {
-    $(sel).each((_, el) => {
-      const blockText = $(el).text().replace(/\s+/g, ' ').trim();
-      const draw = parseSingleBlock(game, blockText);
-      if (!draw) return;
-      if (seen.has(draw.drawDate)) return;
-      draws.push(draw);
-      seen.add(draw.drawDate);
-    });
-    if (draws.length) break;
-  }
-
-  return draws;
+  return items.filter((item) => {
+    const key = `${item.drawDate}:${item.numbers.join('-')}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
-function parseByTextWindows(game, text) {
-  const draws = [];
-  const seen = new Set();
-  const dateRegex = /(\d{2})[\/\-](\d{2})[\/\-](\d{4})/g;
-  let m;
+function parseItem(game, itemXml) {
+  const title = decodeXml(stripTags(extractTag(itemXml, 'title') || ''));
+  const description = decodeXml(stripTags(extractTag(itemXml, 'description') || ''));
+  const encoded = decodeXml(stripTags(extractTag(itemXml, 'content:encoded') || ''));
+  const pubDate = decodeXml(stripTags(extractTag(itemXml, 'pubDate') || ''));
+  const text = [title, description, encoded, pubDate].filter(Boolean).join(' | ').replace(/\s+/g, ' ').trim();
 
-  while ((m = dateRegex.exec(text)) !== null) {
-    const dd = m[1], mm = m[2], yyyy = m[3];
-    const drawDate = `${yyyy}-${mm}-${dd}`;
-    if (seen.has(drawDate)) continue;
-
-    const windowText = text.slice(m.index, m.index + 500);
-    const draw = parseSingleBlock(game, windowText, drawDate);
-    if (!draw) continue;
-
-    draws.push(draw);
-    seen.add(draw.drawDate);
-  }
-
-  return draws;
-}
-
-function parseByEmbeddedJson(game, html) {
-  const draws = [];
-  const seen = new Set();
-
-  const scripts = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi)];
-  for (const s of scripts) {
-    const body = s[1];
-    const dates = [...body.matchAll(/(\d{4}-\d{2}-\d{2}|\d{2}\/\d{2}\/\d{4})/g)];
-    for (const d of dates) {
-      const draw = parseSingleBlock(game, body.slice(d.index, d.index + 500));
-      if (!draw) continue;
-      if (seen.has(draw.drawDate)) continue;
-      draws.push(draw);
-      seen.add(draw.drawDate);
-    }
-  }
-
-  return draws;
-}
-
-function parseSingleBlock(game, blockText, forcedDate = null) {
-  const drawDate = forcedDate || extractDate(blockText);
+  const drawDate = extractDate(text, pubDate);
   if (!drawDate) return null;
 
-  const nums = (blockText.match(/\b\d{1,2}\b/g) || []).map(Number);
-  if (!nums.length) return null;
+  if (game === 'primitiva') {
+    const reintegro = extractExplicitNumber(text, /reintegro\D{0,12}(\d{1,2})/i);
+    const complementario = extractExplicitNumber(text, /complementario\D{0,12}(\d{1,2})/i);
+    let candidates = extractNumbers(text).filter((n) => n >= 1 && n <= 49);
+    candidates = removeDateNoise(candidates, drawDate);
 
-  if (game === 'euromillones') {
-    const mainCandidates = nums.filter((n) => n >= 1 && n <= 50);
-    if (mainCandidates.length < 7) return null;
+    const numbers = uniqueOrdered(candidates).slice(0, 6);
+    if (numbers.length !== 6) return null;
 
-    // Quitamos valores de fecha si aparecen al principio.
-    const cleaned = stripDateNoise(mainCandidates);
-    if (cleaned.length < 7) return null;
-
-    const numbers = uniqueOrdered(cleaned.filter((n) => n >= 1 && n <= 50)).slice(0, 5);
-    const remaining = cleaned.filter((n) => !numbers.includes(n) || countInArray(numbers, n) < countInArray(cleaned.slice(0, 5), n));
-    const starPool = uniqueOrdered(remaining.filter((n) => n >= 1 && n <= 12));
-    const stars = starPool.slice(0, 2);
-
-    if (numbers.length !== 5 || stars.length !== 2) return null;
-    return { drawDate, numbers, stars };
+    return {
+      drawDate,
+      numbers,
+      reintegro: reintegro ?? null,
+      complementario: complementario ?? null
+    };
   }
 
-  const mainCandidates = nums.filter((n) => n >= 0 && n <= 49);
-  if (mainCandidates.length < 7) return null;
+  if (game === 'euromillones') {
+    const starsExplicit = extractSectionNumbers(text, /estrellas?([^|]+)/i, 12);
+    let candidates = extractNumbers(text).filter((n) => n >= 1 && n <= 50);
+    candidates = removeDateNoise(candidates, drawDate);
 
-  const cleaned = stripDateNoise(mainCandidates);
-  if (cleaned.length < 7) return null;
+    let stars = uniqueOrdered(starsExplicit).slice(0, 2);
+    let mainCandidates = candidates;
 
-  const numbers = uniqueOrdered(cleaned.filter((n) => n >= 1 && n <= 49)).slice(0, 6);
-  const tail = cleaned.filter((n) => !numbers.includes(n) || countInArray(numbers, n) < countInArray(cleaned.slice(0, 6), n));
-  const reintegro = tail.find((n) => n >= 0 && n <= 9) ?? null;
+    if (stars.length) {
+      const starSet = new Set(stars);
+      mainCandidates = candidates.filter((n, idx) => idx < 5 || !starSet.has(n));
+    }
 
-  if (numbers.length !== 6) return null;
-  return { drawDate, numbers, reintegro };
-}
+    const numbers = uniqueOrdered(mainCandidates).slice(0, 5);
 
-function extractDate(text) {
-  const m1 = text.match(/(\d{2})[\/\-](\d{2})[\/\-](\d{4})/);
-  if (m1) return `${m1[3]}-${m1[2]}-${m1[1]}`;
+    if (!stars.length) {
+      const tail = [...candidates].reverse().filter((n) => n >= 1 && n <= 12);
+      stars = uniqueOrdered(tail).slice(0, 2).reverse();
+    }
 
-  const m2 = text.match(/(\d{4})-(\d{2})-(\d{2})/);
-  if (m2) return `${m2[1]}-${m2[2]}-${m2[3]}`;
+    if (numbers.length !== 5 || stars.length !== 2) return null;
+
+    return {
+      drawDate,
+      numbers,
+      stars
+    };
+  }
 
   return null;
 }
 
-function stripDateNoise(arr) {
-  const copy = [...arr];
-  if (copy.length >= 3) {
-    // muchos bloques empiezan con dd mm yyyy(2 últimos dígitos) o dd mm
-    copy.shift();
-    copy.shift();
+function extractTag(xml, tagName) {
+  const escaped = tagName.replace(':', '\\:');
+  const m = xml.match(new RegExp(`<${escaped}[^>]*>([\\s\\S]*?)<\\/${escaped}>`, 'i'));
+  return m ? m[1] : null;
+}
+
+function stripTags(text) {
+  return text.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1').replace(/<[^>]+>/g, ' ');
+}
+
+function decodeXml(text) {
+  return text
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
+function extractNumbers(text) {
+  return (text.match(/\b\d{1,2}\b/g) || []).map(Number);
+}
+
+function extractExplicitNumber(text, regex) {
+  const m = text.match(regex);
+  if (!m) return null;
+  return Number(m[1]);
+}
+
+function extractSectionNumbers(text, regex, max) {
+  const m = text.match(regex);
+  if (!m) return [];
+  return uniqueOrdered(extractNumbers(m[1]).filter((n) => n >= 1 && n <= max));
+}
+
+function extractDate(text, pubDate) {
+  const iso = text.match(/(20\d{2})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+
+  const es = text.match(/(\d{2})[\/\-](\d{2})[\/\-](20\d{2})/);
+  if (es) return `${es[3]}-${es[2]}-${es[1]}`;
+
+  if (pubDate) {
+    const date = new Date(pubDate);
+    if (!Number.isNaN(date.getTime())) {
+      const yyyy = date.getUTCFullYear();
+      const mm = String(date.getUTCMonth() + 1).padStart(2, '0');
+      const dd = String(date.getUTCDate()).padStart(2, '0');
+      return `${yyyy}-${mm}-${dd}`;
+    }
   }
-  return copy;
+
+  return null;
 }
 
-function uniqueOrdered(arr) {
+function removeDateNoise(numbers, drawDate) {
+  const [, mm, dd] = drawDate.match(/^(\d{4})-(\d{2})-(\d{2})$/) || [];
+  if (!mm || !dd) return numbers;
+  const month = Number(mm);
+  const day = Number(dd);
+
+  let removedDay = false;
+  let removedMonth = false;
+
+  return numbers.filter((n) => {
+    if (!removedDay && n === day) {
+      removedDay = true;
+      return false;
+    }
+    if (!removedMonth && n === month) {
+      removedMonth = true;
+      return false;
+    }
+    return true;
+  });
+}
+
+function uniqueOrdered(values) {
   const out = [];
-  for (const n of arr) if (!out.includes(n)) out.push(n);
+  const seen = new Set();
+  for (const value of values) {
+    if (seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
   return out;
-}
-
-function countInArray(arr, value) {
-  return arr.filter((x) => x === value).length;
 }

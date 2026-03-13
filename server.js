@@ -7,6 +7,8 @@ import { nowIso } from './utils.js';
 import { generatePrimitiva, generateEuromillones, analyze, MODES } from './services.generator.js';
 import { evaluateTicket } from './services.evaluator.js';
 import { syncOfficial } from './services.officialSync.js';
+import { runSyncAndEvaluate } from './sync.service.js';
+import { startAutoSyncScheduler } from './autosync.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -199,6 +201,15 @@ app.post('/api/admin/evaluate-pending', (req, res) => {
   res.json({ ok: true, updated });
 });
 
+app.post('/api/admin/run-cycle', async (_req, res) => {
+  try {
+    const summary = await runSyncAndEvaluate();
+    res.json({ ok: true, summary });
+  } catch (error) {
+    res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
 app.post('/api/admin/sync-official', async (req, res) => {
   try {
     const game = req.body.game;
@@ -224,4 +235,5 @@ app.get('*', (_req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Radar Loto escuchando en http://localhost:${PORT}`);
+  startAutoSyncScheduler();
 });
