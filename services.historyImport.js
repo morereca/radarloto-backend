@@ -126,7 +126,7 @@ function toIso(day, monthName, year) {
 function dedupe(rows) {
   const seen = new Set();
   return rows.filter((row) => {
-    const key = row.drawDate + '|' + row.numbers.join('-') + '|' + (row.stars?.join('-') || row.reintegro ?? '');
+    const key = row.drawDate + '|' + row.numbers.join('-') + '|' + ((row.stars?.join('-')) || (row.reintegro ?? ''));
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
