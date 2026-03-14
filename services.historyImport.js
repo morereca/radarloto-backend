@@ -21,15 +21,14 @@ export async function importHistory(game, startYear, endYear) {
   let inserted = 0;
   let processed = 0;
   const byYear = [];
-
   for (const year of years) {
     const url = YEAR_URL[game]?.(year);
     if (!url) throw new Error(`Juego no soportado: ${game}`);
 
     const html = await fetchText(url);
     const rows = game === 'primitiva' ? parsePrimitivaYear(html) : parseEuroYear(html);
-
     let insertedYear = 0;
+
     for (const row of rows) {
       processed += 1;
       const result = db.prepare(`
@@ -79,6 +78,7 @@ function stripTags(text) {
     .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<\/?(p|div|li|br|h1|h2|h3|section|article|tr|td|th)[^>]*>/gi, '\n')
     .replace(/<[^>]+>/g, ' ');
 }
 
@@ -87,15 +87,14 @@ function normalize(text) {
     .replace(/&nbsp;/g, ' ')
     .replace(/&amp;/g, '&')
     .replace(/\u00a0/g, ' ')
-    .replace(/\s+/g, ' ')
+    .replace(/[ \t\r]+/g, ' ')
+    .replace(/\n+/g, '\n')
     .trim();
 }
 
 function parsePrimitivaYear(html) {
-  const text = normalize(html);
-  const lines = text.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+  const lines = normalize(html).split('\n').map((s) => s.trim()).filter(Boolean);
   const out = [];
-
   const resultRe = /^(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-C(\d{2})\s+-R(\d)$/i;
   const dateRe = /^(?:lun|mar|mie|mié|jue|vie|sab|sáb|dom),\s+(\d{1,2})\s+([a-záéíóú]+)\s+(\d{4})$/i;
 
@@ -113,10 +112,8 @@ function parsePrimitivaYear(html) {
 }
 
 function parseEuroYear(html) {
-  const text = normalize(html);
-  const lines = text.split(/\n+/).map((s) => s.trim()).filter(Boolean);
+  const lines = normalize(html).split('\n').map((s) => s.trim()).filter(Boolean);
   const out = [];
-
   const resultRe = /^(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-E(\d{2})\s+-E(\d{2})$/i;
   const dateRe = /^(?:lun|mar|mie|mié|jue|vie|sab|sáb|dom),\s+(\d{1,2})\s+([a-záéíóú]+)\s+(\d{4})$/i;
 

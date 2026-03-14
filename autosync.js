@@ -28,6 +28,7 @@ export function startAutoSyncScheduler() {
       const year = new Date().getFullYear();
       const covPrim = getDrawCoverage('primitiva');
       const covEuro = getDrawCoverage('euromillones');
+
       if (Number(covPrim.total || 0) < 50) {
         const importedPrim = await importHistory('primitiva', 2016, year);
         console.log('[autosync] Histórico base importado primitiva:', JSON.stringify(importedPrim));
@@ -36,6 +37,7 @@ export function startAutoSyncScheduler() {
         const importedEuro = await importHistory('euromillones', 2016, year);
         console.log('[autosync] Histórico base importado euromillones:', JSON.stringify(importedEuro));
       }
+
       const summary = await runSyncAndEvaluate();
       console.log('[autosync] Primera sincronización completada:', JSON.stringify(summary));
     } catch (error) {
