@@ -1,0 +1,29 @@
+
+PON ESTO EN TU server.js EXISTENTE
+
+1) Arriba del todo, junto a los otros require:
+
+const generateSmartRoute = require('./routes/generate-smart');
+
+2) Después de app.use(express.json()); añade:
+
+app.use(generateSmartRoute);
+
+3) Reinicia el backend.
+
+QUÉ PASA DESPUÉS
+La ruta nueva quedará así:
+
+POST /api/generate-smart
+
+Body ejemplo Primitiva:
+{
+  "game": "primitiva",
+  "mode": "radar_ai"
+}
+
+Body ejemplo Euromillones:
+{
+  "game": "euromillones",
+  "mode": "hot"
+}
