@@ -1,28 +1,31 @@
+
 import express from 'express';
-import { generateNumbers } from '../generator.engine.js';
-import { loadStatsForGame } from '../stats.provider.js';
+import { getNumberStats } from '../services.stats.js';
+import { generateSmartNumbers } from '../smart.generator.js';
 
 const router = express.Router();
 
 router.post('/api/generate-smart', async (req, res) => {
   try {
-    const { game, mode } = req.body || {};
+    const { game, mode = 'radar_ai' } = req.body || {};
 
     if (!['primitiva', 'euromillones'].includes(game)) {
-      return res.status(400).json({ ok: false, error: 'Invalid game' });
+      return res.status(400).json({ ok: false, error: 'Juego no válido' });
     }
 
-    if (!['random', 'hot', 'cold', 'balanced', 'anti_dates', 'high_dispersion', 'radar_ai'].includes(mode)) {
-      return res.status(400).json({ ok: false, error: 'Invalid mode' });
-    }
+    const internalStats = getNumberStats(game);
+    const stats = {
+      hotMain: internalStats.hotMain || [],
+      coldMain: internalStats.coldMain || [],
+      hotExtra: internalStats.hotExtra || [],
+      coldExtra: internalStats.coldExtra || [],
+    };
 
-    const stats = await loadStatsForGame(game);
-    const result = generateNumbers({ game, mode, stats });
-
+    const result = generateSmartNumbers({ game, mode, stats });
     return res.json({ ok: true, result });
   } catch (error) {
     console.error('generate-smart error', error);
-    return res.status(500).json({ ok: false, error: 'Internal server error' });
+    return res.status(500).json({ ok: false, error: String(error.message || error) });
   }
 });
 
