@@ -1,0 +1,31 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>RadarLoto Importar Histórico</title>
+<style>
+body{font-family:Arial;background:#f4f6fb;padding:40px}
+button{padding:15px 20px;font-size:16px;background:#2563eb;color:white;border:none;border-radius:8px}
+</style>
+</head>
+<body>
+
+<h2>Importar histórico RadarLoto</h2>
+
+<p>Este botón ejecuta la importación de los datasets de 10 años.</p>
+
+<button onclick="run()">Importar histórico</button>
+
+<pre id="out"></pre>
+
+<script>
+async function run(){
+ const r = await fetch("/api/admin/import-dataset",{method:"POST"});
+ const t = await r.text();
+ document.getElementById("out").textContent = t;
+}
+</script>
+
+</body>
+</html>
