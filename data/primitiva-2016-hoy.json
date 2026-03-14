@@ -1,0 +1,18 @@
+{
+  "draws": [
+    {
+      "drawDate": "2026-03-12",
+      "numbers": [
+        5,
+        12,
+        16,
+        22,
+        29,
+        36
+      ],
+      "reintegro": 2,
+      "sourceName": "archivo local",
+      "sourceUrl": "https://example.com/primitiva"
+    }
+  ]
+}
