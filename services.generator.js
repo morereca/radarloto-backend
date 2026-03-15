@@ -1,4 +1,12 @@
-
+export const MODES = [
+  { name: 'Equilibrado' },
+  { name: 'Anti-fechas' },
+  { name: 'Números raros' },
+  { name: 'Alta dispersión' },
+  { name: 'Números calientes' },
+  { name: 'Números fríos' },
+  { name: 'Radar Loto IA' }
+];
 import { rand } from './utils.js';
 import { getNumberStats } from './services.stats.js';
 
