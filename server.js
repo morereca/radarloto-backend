@@ -1,217 +1,385 @@
-import express from "express";
-import cors from "cors";
-import { db } from "./db.js";
-import { importHistory } from "./services.historyImport.js";
-import { getDrawCoverage } from "./services.stats.js";
+import express from 'express';
+import cors from 'cors';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { db } from './db.js';
+import { nowIso } from './utils.js';
+import { generatePrimitiva, generateEuromillones, analyze, MODES } from './services.generator.js';
+import { evaluateTicket } from './services.evaluator.js';
+import { syncOfficial } from './services.officialSync.js';
+import { runSyncAndEvaluate } from './sync.service.js';
+import { startAutoSyncScheduler } from './autosync.js';
+import { getNumberStats, getDrawCoverage } from './services.stats.js';
+import { importHistory } from './services.historyImport.js';
+import generateSmartRoute from './routes/generate-smart.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const _dirname = path.dirname(_filename);
 
 const app = express();
-
 app.use(cors());
 app.use(express.json());
 
-/* ================================
-   HEALTH
-================================ */
+app.use(express.static(path.join(__dirname, 'public')));
 
-app.get("/api/health", (req, res) => {
+app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
 
-/* ================================
-   GENERAR COMBINACIÓN
-================================ */
-
-app.post("/api/generate", (req, res) => {
-
-  const game = req.body.game;
-
-  if (!["primitiva","euromillones"].includes(game)) {
-    return res.status(400).json({ error: "Juego no válido" });
-  }
-
-  let numbers = [];
-  let stars = [];
-  let reintegro = null;
-
-  if (game === "primitiva") {
-
-    while (numbers.length < 6) {
-      const n = Math.floor(Math.random() * 49) + 1;
-      if (!numbers.includes(n)) numbers.push(n);
-    }
-
-    reintegro = Math.floor(Math.random() * 10);
-
-  }
-
-  if (game === "euromillones") {
-
-    while (numbers.length < 5) {
-      const n = Math.floor(Math.random() * 50) + 1;
-      if (!numbers.includes(n)) numbers.push(n);
-    }
-
-    while (stars.length < 2) {
-      const n = Math.floor(Math.random() * 12) + 1;
-      if (!stars.includes(n)) stars.push(n);
-    }
-
-  }
-
-  numbers.sort((a,b)=>a-b);
-
-  res.json({
-    generated: {
-      numbers,
-      stars,
-      reintegro
-    }
-  });
-
+app.get('/api/config', (_req, res) => {
+  res.json({ modes: MODES });
 });
 
+app.post('/api/generate', (req, res) => {
+  const game = req.body.game;
+  const mode = req.body.mode || 'Números raros';
 
-/* ================================
-   HISTÓRICO
-================================ */
+  if (!['primitiva', 'euromillones'].includes(game)) {
+    return res.status(400).json({ error: 'Juego no válido' });
+  }
 
-app.get("/api/draws", (req,res)=>{
+  const draw = game === 'primitiva' ? generatePrimitiva(mode) : generateEuromillones(mode);
+  const analysis = analyze(game, draw, mode);
 
+  const createdAt = nowIso();
+  const insert = db.prepare(`
+    INSERT INTO tickets (
+      game, mode, numbers_json, stars_json, reintegro, created_at, status
+    ) VALUES (?, ?, ?, ?, ?, ?, 'pending')
+  `).run(
+    game,
+    mode,
+    JSON.stringify((draw.numbers || []).map(Number)),
+    game === 'euromillones' ? JSON.stringify((draw.stars || []).map(Number)) : null,
+    game === 'primitiva' ? Number(draw.reintegro) : null,
+    createdAt
+  );
+
+  const ticket = db.prepare(SELECT * FROM tickets WHERE id = ?).get(insert.lastInsertRowid);
+
+  res.json({
+    ticket,
+    generated: draw,
+    analysis
+  });
+});
+
+app.get('/api/tickets', (_req, res) => {
+  const tickets = db.prepare(`
+    SELECT * FROM tickets
+    ORDER BY id DESC
+    LIMIT 100
+  `).all();
+  res.json({ tickets });
+});
+
+app.get('/api/feed', (_req, res) => {
+  const feed = db.prepare(`
+    SELECT id, game, mode, numbers_json, stars_json, reintegro, status, outcome_label, prize_amount, created_at
+    FROM tickets
+    ORDER BY id DESC
+    LIMIT 20
+  `).all();
+  res.json({ feed });
+});
+
+app.get('/api/stats', (_req, res) => {
+  const totals = db.prepare(`
+    SELECT
+      COUNT(*) as total_generated,
+      COALESCE(SUM(CASE WHEN game = 'primitiva' THEN 1 ELSE 0 END), 0) as primitiva_generated,
+      COALESCE(SUM(CASE WHEN game = 'euromillones' THEN 1 ELSE 0 END), 0) as euromillones_generated,
+      COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) as pending_count,
+      COALESCE(SUM(CASE WHEN status = 'won' THEN 1 ELSE 0 END), 0) as won_count,
+      COALESCE(SUM(CASE WHEN status = 'lost' THEN 1 ELSE 0 END), 0) as lost_count
+    FROM tickets
+  `).get();
+
+  res.json({ stats: totals });
+});
+
+app.get('/api/prize-ranking', (_req, res) => {
+  res.json({ ranking: [] });
+});
+
+app.get('/api/draws', (req, res) => {
   const game = req.query.game;
-
+  if (!game || !['primitiva', 'euromillones'].includes(game)) {
+    return res.status(400).json({ error: 'game requerido' });
+  }
   const draws = db.prepare(`
-    SELECT *
-    FROM draws
+    SELECT * FROM draws
     WHERE game = ?
     ORDER BY draw_date DESC
     LIMIT 100
   `).all(game);
-
   res.json({ draws });
-
 });
 
-
-/* ================================
-   IMPORTAR HISTÓRICO 10 AÑOS
-================================ */
-
-app.get("/api/admin/import-10-years", async (req,res)=>{
-
-  try{
-
-    const year = new Date().getFullYear();
-
-    const primitiva = await importHistory("primitiva",2016,year);
-    const euromillones = await importHistory("euromillones",2016,year);
-
-    res.json({
-      ok:true,
-      result:{
-        primitiva,
-        euromillones
-      },
-      coverage:{
-        primitiva:getDrawCoverage("primitiva"),
-        euromillones:getDrawCoverage("euromillones")
-      }
-    });
-
-  }catch(error){
-
-    res.status(500).json({
-      error:String(error.message || error)
-    });
-
+app.post('/api/admin/import-draw', (req, res) => {
+  const { game, drawDate, numbers, stars, reintegro, sourceUrl } = req.body;
+  if (!game || !drawDate || !Array.isArray(numbers)) {
+    return res.status(400).json({ error: 'Faltan campos obligatorios' });
   }
 
+  db.prepare(`
+    INSERT OR REPLACE INTO draws (
+      game, draw_date, numbers_json, stars_json, reintegro, source_url, source_name, imported_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    game,
+    drawDate,
+    JSON.stringify(numbers),
+    stars ? JSON.stringify(stars) : null,
+    reintegro ?? null,
+    sourceUrl || null,
+    sourceUrl ? 'manual+source' : 'manual',
+    nowIso()
+  );
+
+  res.json({ ok: true });
 });
 
+app.post('/api/admin/evaluate-pending', (req, res) => {
+  const pending = db.prepare(`
+    SELECT * FROM tickets
+    WHERE status = 'pending'
+    ORDER BY id ASC
+  `).all();
 
-/* ================================
-   COBERTURA HISTÓRICO
-================================ */
+  let updated = 0;
+  for (const ticket of pending) {
+    const draw = db.prepare(`
+      SELECT * FROM draws
+      WHERE game = ?
+      AND draw_date >= date(substr(?, 1, 10))
+      ORDER BY draw_date ASC
+      LIMIT 1
+    `).get(ticket.game, ticket.created_at);
 
-app.get("/api/history-coverage", (req,res)=>{
+    if (!draw) continue;
 
+    const result = evaluateTicket(ticket, draw);
+
+    db.prepare(`
+      UPDATE tickets
+      SET
+        draw_date = ?,
+        main_hits = ?,
+        star_hits = ?,
+        reintegro_hit = ?,
+        outcome_label = ?,
+        outcome_detail = ?,
+        prize_amount = ?,
+        status = ?
+      WHERE id = ?
+    `).run(
+      draw.draw_date,
+      result.mainHits,
+      result.starHits,
+      result.reintegroHit,
+      result.label,
+      result.detail,
+      result.prizeAmount,
+      result.won ? 'won' : 'lost',
+      ticket.id
+    );
+    updated += 1;
+  }
+
+  res.json({ ok: true, updated });
+});
+
+app.post('/api/admin/run-cycle', async (_req, res) => {
+  try {
+    const summary = await runSyncAndEvaluate();
+    res.json({ ok: true, summary });
+  } catch (error) {
+    res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+app.post('/api/admin/sync-official', async (req, res) => {
+  try {
+    const game = req.body.game;
+    if (!['primitiva', 'euromillones'].includes(game)) {
+      return res.status(400).json({ error: 'Juego no válido' });
+    }
+    const result = await syncOfficial(game);
+    res.json({ ok: true, result });
+  } catch (error) {
+    db.prepare(`
+      INSERT INTO sync_runs (game, status, message, ran_at)
+      VALUES (?, ?, ?, ?)
+    `).run(req.body.game || 'unknown', 'error', String(error.message || error), nowIso());
+
+    res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+app.get('/api/history-coverage', (_req, res) => {
   res.json({
-    primitiva:getDrawCoverage("primitiva"),
-    euromillones:getDrawCoverage("euromillones")
+    primitiva: getDrawCoverage('primitiva'),
+    euromillones: getDrawCoverage('euromillones')
   });
-
 });
 
+app.get('/api/number-stats', (req, res) => {
+  const game = req.query.game;
+  if (!game || !['primitiva', 'euromillones'].includes(game)) {
+    return res.status(400).json({ error: 'game requerido' });
+  }
+  const stats = getNumberStats(game);
+  res.json({
+    game,
+    coverage: stats.coverage,
+    hot_numbers: stats.hotMain.slice(0, 12),
+    cold_numbers: stats.coldMain.slice(0, 12),
+    hot_extra: stats.hotExtra.slice(0, 6),
+    cold_extra: stats.coldExtra.slice(0, 6),
+    main_counts: stats.mainCounts,
+    extra_counts: stats.extraCounts
+  });
+});
 
-/* ================================
-   AUTO CARGA HISTÓRICO
-================================ */
+app.post('/api/admin/import-history', async (req, res) => {
+  try {
+    const game = req.body.game;
+    if (!['primitiva', 'euromillones'].includes(game)) {
+      return res.status(400).json({ error: 'Juego no válido' });
+    }
+    const year = new Date().getFullYear();
+    const startYear = Number(req.body.startYear || 2016);
+    const endYear = Number(req.body.endYear || year);
 
-async function ensureHistoricalBackfill(){
+    const result = await importHistory(game, startYear, endYear);
+    res.json({ ok: true, result, coverage: getDrawCoverage(game) });
+  } catch (error) {
+    res.status(500).json({ error: String(error.message || error) });
+  }
+});
 
-  try{
+app.post('/api/admin/import-history-all', async (_req, res) => {
+  try {
+    const year = new Date().getFullYear();
+    const primitiva = await importHistory('primitiva', 2016, year);
+    const euromillones = await importHistory('euromillones', 2016, year);
+    res.json({
+      ok: true,
+      result: { primitiva, euromillones },
+      coverage: {
+        primitiva: getDrawCoverage('primitiva'),
+        euromillones: getDrawCoverage('euromillones')
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: String(error.message || error) });
+  }
+});
 
+app.post('/api/admin/import-10-years', async (_req, res) => {
+  try {
+    const year = new Date().getFullYear();
+    const primitiva = await importHistory('primitiva', 2016, year);
+    const euromillones = await importHistory('euromillones', 2016, year);
+    res.json({
+      ok: true,
+      result: { primitiva, euromillones },
+      coverage: {
+        primitiva: getDrawCoverage('primitiva'),
+        euromillones: getDrawCoverage('euromillones')
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+app.get('/api/admin/import-10-years-browser', async (_req, res) => {
+  try {
+    const year = new Date().getFullYear();
+    const primitiva = await importHistory('primitiva', 2016, year);
+    const euromillones = await importHistory('euromillones', 2016, year);
+    res.json({
+      ok: true,
+      result: { primitiva, euromillones },
+      coverage: {
+        primitiva: getDrawCoverage('primitiva'),
+        euromillones: getDrawCoverage('euromillones')
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+app.get('/api/admin/import-history-browser', async (req, res) => {
+  try {
+    const game = req.query.game;
+    if (!['primitiva', 'euromillones'].includes(game)) {
+      return res.status(400).json({ error: 'Juego no válido' });
+    }
+    const year = new Date().getFullYear();
+    const startYear = Number(req.query.startYear || 2016);
+    const endYear = Number(req.query.endYear || year);
+
+    const result = await importHistory(game, startYear, endYear);
+    res.json({ ok: true, result, coverage: getDrawCoverage(game) });
+  } catch (error) {
+    res.status(500).json({ error: String(error.message || error) });
+  }
+});
+
+// ruta IA
+app.use(generateSmartRoute);
+
+app.get('*', (_req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
+async function ensureHistoricalBackfill() {
+  try {
     const year = new Date().getFullYear();
 
-    const primCoverage = getDrawCoverage("primitiva");
-    const euroCoverage = getDrawCoverage("euromillones");
+    const primCoverage = getDrawCoverage('primitiva');
+    const euroCoverage = getDrawCoverage('euromillones');
 
-    const primCount = primCoverage?.total || primCoverage?.total_draws || 0;
-    const euroCount = euroCoverage?.total || euroCoverage?.total_draws || 0;
+    const primCount = Number(primCoverage?.total_draws || primCoverage?.total || 0);
+    const euroCount = Number(euroCoverage?.total_draws || euroCoverage?.total || 0);
 
     const needsPrim = primCount < 300;
     const needsEuro = euroCount < 300;
 
-    if(!needsPrim && !needsEuro){
-
-      console.log("Histórico suficiente, no se necesita cargar");
-
+    if (!needsPrim && !needsEuro) {
+      console.log('[history-bootstrap] histórico suficiente, no hace falta backfill');
       return;
-
     }
 
-    console.log("Cargando histórico de 10 años...");
+    console.log('[history-bootstrap] iniciando carga histórica de 10 años...');
 
-    if(needsPrim){
-
-      const primResult = await importHistory("primitiva",2016,year);
-
-      console.log("Primitiva importada:",primResult);
-
+    if (needsPrim) {
+      const primResult = await importHistory('primitiva', 2016, year);
+      console.log('[history-bootstrap] primitiva importada', JSON.stringify(primResult));
     }
 
-    if(needsEuro){
-
-      const euroResult = await importHistory("euromillones",2016,year);
-
-      console.log("Euromillones importado:",euroResult);
-
+    if (needsEuro) {
+      const euroResult = await importHistory('euromillones', 2016, year);
+      console.log('[history-bootstrap] euromillones importado', JSON.stringify(euroResult));
     }
 
-    console.log("Cobertura final:",{
-      primitiva:getDrawCoverage("primitiva"),
-      euromillones:getDrawCoverage("euromillones")
-    });
-
+    console.log('[history-bootstrap] cobertura final', JSON.stringify({
+      primitiva: getDrawCoverage('primitiva'),
+      euromillones: getDrawCoverage('euromillones')
+    }));
+  } catch (error) {
+    console.error('[history-bootstrap] error', error);
   }
-  catch(error){
-
-    console.error("Error cargando histórico:",error);
-
-  }
-
 }
 
-
-/* ================================
-   SERVER
-================================ */
-
 const PORT = process.env.PORT || 3000;
-
-app.listen(PORT, async ()=>{
-
-  console.log("RadarLoto backend iniciado en puerto",PORT);
+app.listen(PORT, async () => {
+  console.log(Radar Loto escuchando en http://localhost:${PORT});
 
   await ensureHistoricalBackfill();
-
+  startAutoSyncScheduler();
 });
