@@ -55,7 +55,7 @@ app.post('/api/generate', (req, res) => {
     createdAt
   );
 
-  const ticket = db.prepare(SELECT * FROM tickets WHERE id = ?).get(insert.lastInsertRowid);
+  const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(insert.lastInsertRowid);
 
   res.json({
     ticket,
