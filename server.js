@@ -378,7 +378,7 @@ async function ensureHistoricalBackfill() {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-  console.log(Radar Loto escuchando en http://localhost:${PORT});
+  console.log('Radar Loto escuchando en http://localhost:${PORT}');
 
   await ensureHistoricalBackfill();
   startAutoSyncScheduler();
