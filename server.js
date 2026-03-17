@@ -993,12 +993,7 @@ start().catch((err) => {
   console.error("No se pudo iniciar el backend:", err);
   process.exit(1);
 });
-app.post("/api/admin/clear-primitiva", async (req, res) => {
-  try {
-    const result = db.prepare("DELETE FROM draws WHERE game = 'primitiva'").run();
-    res.json({ ok: true, deleted: result.changes });
-  } catch (error) {
-    console.error("clear-primitiva error", error);
-    res.status(500).json({ ok: false, error: "No se pudo borrar Primitiva" });
-  }
+app.get("/api/admin/clear-primitiva", (req, res) => {
+  const result = db.prepare("DELETE FROM draws WHERE game = 'primitiva'").run();
+  res.json({ ok: true, deleted: result.changes });
 });
