@@ -117,18 +117,17 @@ function parseCsvLine(game, line) {
     if (numberTokens.length < 6) return null;
 
     const numbers = numberTokens.slice(0, 6);
-
     let complementary = null;
     let reintegro = null;
 
-    // Caso más completo: 6 números + complementario + reintegro
+    // Caso ideal: 6 números + complementario + reintegro
     if (numberTokens.length >= 8) {
-      complementary = numberTokens[6] ?? null;
-      reintegro = numberTokens[7] ?? null;
+      complementary = normalizeOneDigit(numberTokens[6], 1, 49);
+      reintegro = normalizeOneDigit(numberTokens[7], 0, 9);
     }
     // Caso parcial: 6 números + reintegro
     else if (numberTokens.length === 7) {
-      reintegro = numberTokens[6] ?? null;
+      reintegro = normalizeOneDigit(numberTokens[6], 0, 9);
     }
 
     return {
@@ -185,20 +184,41 @@ function extractNumbersAfterDate(line, dateString) {
     .filter(n => Number.isFinite(n));
 }
 
-function dedupe(rows) {
-  const seen = new Set();
+function normalizeOneDigit(value, min, max) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  if (n < min || n > max) return null;
+  return n;
+}
 
-  return rows.filter((row) => {
+function dedupe(rows) {
+  const byKey = new Map();
+
+  for (const row of rows) {
     const key = [
       row.drawDate,
       row.numbers.join('-'),
-      (row.stars || []).join('-'),
-      row.complementary ?? '',
-      row.reintegro ?? ''
+      (row.stars || []).join('-')
     ].join('|');
 
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, row);
+      continue;
+    }
+
+    const existingScore =
+      (existing.reintegro != null ? 1 : 0) +
+      (existing.complementary != null ? 1 : 0);
+
+    const rowScore =
+      (row.reintegro != null ? 1 : 0) +
+      (row.complementary != null ? 1 : 0);
+
+    if (rowScore > existingScore) {
+      byKey.set(key, row);
+    }
+  }
+
+  return [...byKey.values()].sort((a, b) => b.drawDate.localeCompare(a.drawDate));
 }
