@@ -1,0 +1,11 @@
+{
+  "stats": {
+    "total_generated": 0,
+    "powerball_generated": 0,
+    "megamillions_generated": 0,
+    "won_count": 0
+  },
+  "ranking": [],
+  "last_sync_at": null,
+  "sync_log": []
+}
