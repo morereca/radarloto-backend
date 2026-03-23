@@ -2,9 +2,9 @@
   "name": "radarloto-backend",
   "version": "1.0.0",
   "type": "module",
-  "main": "server.js",
+  "main": "server-usa.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server-usa.js"
   },
   "dependencies": {
     "express": "^4.19.2",
@@ -12,6 +12,7 @@
     "better-sqlite3": "^11.7.0",
     "cheerio": "^1.0.0",
     "node-fetch": "^3.3.2",
-    "node-cron": "^3.0.3"
+    "node-cron": "^3.0.3",
+    "pg": "^8.12.0"
   }
 }
