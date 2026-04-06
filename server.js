@@ -1,4 +1,5 @@
 import express from "express";
+import rateLimit from "express-rate-limit";
 import cors from "cors";
 import path from "path";
 import pkg from "pg";
@@ -6,6 +7,18 @@ import { fileURLToPath } from "url";
 
 const { Pool } = pkg;
 const app = express();
+app.set("trust proxy", 1);
+
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minuto
+  max: 100, // máximo 100 peticiones por IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: "Too many requests, try again later."
+});
+
+// protege SOLO /api
+app.use("/api", apiLimiter);
 
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
