@@ -1,9 +1,33 @@
+import rateLimit from "express-rate-limit";
 import express from "express";
 import cors from "cors";
 import pkg from "pg";
 
 const { Pool } = pkg;
 const app = express();
+app.set("trust proxy", true);
+
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: "Too many requests, try again later.",
+  keyGenerator: (req) => {
+    const cfIp = req.headers["cf-connecting-ip"];
+    const forwarded = req.headers["x-forwarded-for"];
+
+    if (typeof cfIp === "string" && cfIp.trim()) return cfIp.trim();
+    if (typeof forwarded === "string" && forwarded.trim()) {
+      return forwarded.split(",")[0].trim();
+    }
+
+    return req.ip;
+  }
+});
+
+// protege /api
+app.use("/api", apiLimiter);
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
