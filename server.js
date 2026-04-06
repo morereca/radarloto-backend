@@ -7,14 +7,25 @@ import { fileURLToPath } from "url";
 
 const { Pool } = pkg;
 const app = express();
-app.set("trust proxy", 1);
+app.set("trust proxy", true);
 
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minuto
   max: 100, // máximo 100 peticiones por IP
   standardHeaders: true,
   legacyHeaders: false,
-  message: "Too many requests, try again later."
+  message: "Too many requests, try again later.",
+  keyGenerator: (req) => {
+    const cfIp = req.headers["cf-connecting-ip"];
+    const forwarded = req.headers["x-forwarded-for"];
+
+    if (typeof cfIp === "string" && cfIp.trim()) return cfIp.trim();
+    if (typeof forwarded === "string" && forwarded.trim()) {
+      return forwarded.split(",")[0].trim();
+    }
+
+    return req.ip;
+  }
 });
 
 // protege SOLO /api
