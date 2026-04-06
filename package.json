@@ -2,9 +2,9 @@
   "name": "radarloto-backend",
   "version": "1.0.0",
   "type": "module",
-  "main": "server-usa.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node server-usa.js"
+    "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.19.2",
