@@ -1,0 +1,19 @@
+{
+  "draws": [
+    {
+      "drawDate": "2026-03-13",
+      "numbers": [2, 11, 19, 27, 38, 46],
+      "reintegro": 5
+    },
+    {
+      "drawDate": "2026-03-11",
+      "numbers": [6, 13, 21, 30, 41, 48],
+      "reintegro": 3
+    },
+    {
+      "drawDate": "2026-03-09",
+      "numbers": [1, 8, 17, 25, 33, 44],
+      "reintegro": 7
+    }
+  ]
+}
