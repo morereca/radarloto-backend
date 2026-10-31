@@ -97,15 +97,13 @@ const pool = new Pool({
 
 const CSV_URLS = {
   primitiva: process.env.PRIMITIVA_CSV_URL || "https://docs.google.com/spreadsheets/d/e/2PACX-1vTov1BuA0nkVGTS48arpPFkc9cG7B40Xi3BfY6iqcWTrMwCBg5b50-WwvnvaR6mxvFHbDBtYFKg5IsJ/pub?gid=1&output=csv&single=true",
-  euromillones: process.env.EUROMILLONES_CSV_URL || "https://docs.google.com/spreadsheets/d/e/2PACX-1vRy91wfK2JteoMi1ZOhGm0D1RKJfDTbEOj6rfnrB6-X7n2Q1nfFwBZBpcivHRdg3pSwxSQgLA3KpW7v/pub?output=csv",
-  bonoloto: process.env.BONOLOTO_CSV_URL || "https://docs.google.com/spreadsheets/d/e/2PACX-1vSsyaLOJeFQiLJNKHRXDx-LsRfnNEXgOyZVUr0Kpa2_7mxr1-t3LX-gg3QFIB_byvZ3BkDVxY4NUAlO/pub?output=csv"
+  euromillones: process.env.EUROMILLONES_CSV_URL || "https://docs.google.com/spreadsheets/d/e/2PACX-1vRy91wfK2JteoMi1ZOhGm0D1RKJfDTbEOj6rfnrB6-X7n2Q1nfFwBZBpcivHRdg3pSwxSQgLA3KpW7v/pub?output=csv"
 };
 
 const stats = {
   total_generated: 0,
   primitiva_generated: 0,
   euromillones_generated: 0,
-  bonoloto_generated: 0,
   won_count: 0
 };
 
@@ -182,7 +180,6 @@ function inHistoryWindow(drawDate) {
 function gameConfig(game) {
   if (game === "primitiva") return { numbers: 6, min: 1, max: 49, stars: 0, starMax: 0 };
   if (game === "euromillones") return { numbers: 5, min: 1, max: 50, stars: 2, starMax: 12 };
-  if (game === "bonoloto") return { numbers: 6, min: 1, max: 49, stars: 0, starMax: 0 };
   return null;
 }
 
@@ -279,7 +276,6 @@ async function loadGeneratedCache() {
     stats.total_generated = Number(payload.stats.total_generated || 0);
     stats.primitiva_generated = Number(payload.stats.primitiva_generated || 0);
     stats.euromillones_generated = Number(payload.stats.euromillones_generated || 0);
-    stats.bonoloto_generated = Number(payload.stats.bonoloto_generated || 0);
     stats.won_count = Number(payload.stats.won_count || 0);
   }
 
@@ -311,7 +307,6 @@ async function rebuildStatsFromDatabase() {
       COUNT(*)::int AS total_generated,
       COUNT(*) FILTER (WHERE game = 'primitiva')::int AS primitiva_generated,
       COUNT(*) FILTER (WHERE game = 'euromillones')::int AS euromillones_generated,
-      COUNT(*) FILTER (WHERE game = 'bonoloto')::int AS bonoloto_generated,
       COUNT(*) FILTER (WHERE historical_winning_draws > 0)::int AS won_count
     FROM es_generated
   `);
@@ -320,7 +315,6 @@ async function rebuildStatsFromDatabase() {
   stats.total_generated = Number(row.total_generated || 0);
   stats.primitiva_generated = Number(row.primitiva_generated || 0);
   stats.euromillones_generated = Number(row.euromillones_generated || 0);
-  stats.bonoloto_generated = Number(row.bonoloto_generated || 0);
   stats.won_count = Number(row.won_count || 0);
 }
 
@@ -397,25 +391,6 @@ function parseCsvLineForGame(game, line) {
       reintegro: Number.isFinite(reintegro) ? reintegro : null,
       complementary: Number.isFinite(complementary) ? complementary : null,
       source: "csv_primitiva"
-    };
-  }
-
-  if (game === "bonoloto") {
-    if (numberTokens.length < 6) return null;
-    const numbers = numberTokens.slice(0, 6).sort((a, b) => a - b);
-    const extra = numberTokens.slice(6);
-
-    const complementary = extra.find((n) => !numbers.includes(n)) ?? null;
-    const reintegro = extra.length ? extra[extra.length - 1] : null;
-
-    return {
-      game: "bonoloto",
-      drawDate: date.iso,
-      numbers,
-      stars: [],
-      reintegro: Number.isFinite(reintegro) ? reintegro : null,
-      complementary: Number.isFinite(complementary) ? complementary : null,
-      source: "csv_bonoloto"
     };
   }
 
@@ -520,11 +495,6 @@ async function syncHistory(force = false) {
 
     try { await importHistory("euromillones", startYear, year); }
     catch (err) { logSync(`Error al importar euromillones: ${err.message}`); }
-
-    if (CSV_URLS.bonoloto) {
-      try { await importHistory("bonoloto", startYear, year); }
-      catch (err) { logSync(`Error al importar bonoloto: ${err.message}`); }
-    }
 
     lastSyncAt = new Date().toISOString();
     await saveGeneratedCache();
@@ -643,7 +613,7 @@ async function generateCombination(game, mode = "Al azar") {
     if (game === "euromillones") stars = uniqueRandoms(cfg.stars, 1, cfg.starMax);
   }
 
-  if (game === "primitiva" || game === "bonoloto") reintegro = Math.floor(Math.random() * 10);
+  if (game === "primitiva") reintegro = Math.floor(Math.random() * 10);
   return { numbers, stars, reintegro };
 }
 
@@ -702,17 +672,6 @@ function classifyPrimitiva(matches, complementaryHit, reintegroHit) {
   return null;
 }
 
-function classifyBonoloto(matches, complementaryHit, reintegroHit) {
-  if (matches === 6) return "1ª (6)";
-  if (matches === 5 && complementaryHit) return "2ª (5 + C)";
-  if (matches === 5) return "3ª (5)";
-  if (matches === 4) return "4ª (4)";
-  if (matches === 3) return "5ª (3)";
-  if (matches === 2) return "6ª (2)";
-  if (reintegroHit) return "Reintegro";
-  return null;
-}
-
 function classifyEuromillones(numMatches, starMatches) {
   const table = {
     "5+2": "1ª (5 + 2)",
@@ -743,12 +702,10 @@ async function simulateHistorical(game, generated) {
   for (const draw of draws) {
     const numMatches = draw.numbers.filter((n) => genNums.has(n)).length;
 
-    if (game === "primitiva" || game === "bonoloto") {
+    if (game === "primitiva") {
       const complementaryHit = draw.complementary != null && genNums.has(draw.complementary);
       const reintegroHit = draw.reintegro != null && Number(draw.reintegro) === Number(generated.reintegro);
-      const category = game === "bonoloto"
-        ? classifyBonoloto(numMatches, complementaryHit, reintegroHit)
-        : classifyPrimitiva(numMatches, complementaryHit, reintegroHit);
+      const category = classifyPrimitiva(numMatches, complementaryHit, reintegroHit);
       if (category) {
         winningDraws += 1;
         breakdownMap[category] = (breakdownMap[category] || 0) + 1;
@@ -798,7 +755,6 @@ function registerStats(game, historicalSimulation = null) {
   stats.total_generated += 1;
   if (game === "primitiva") stats.primitiva_generated += 1;
   if (game === "euromillones") stats.euromillones_generated += 1;
-  if (game === "bonoloto") stats.bonoloto_generated += 1;
   if ((historicalSimulation?.winning_draws || 0) > 0) stats.won_count += 1;
 }
 
@@ -821,19 +777,6 @@ async function registerGeneratedCombination(game, mode, generated, analysis = nu
 }
 
 function getPrizeTierScore(game, label, matchesMain = 0, matchesExtra = 0) {
-  if (game === "bonoloto") {
-    const map = {
-      "1ª (6)": 700,
-      "2ª (5 + C)": 600,
-      "3ª (5)": 500,
-      "4ª (4)": 400,
-      "5ª (3)": 300,
-      "6ª (2)": 150,
-      "Reintegro": 100
-    };
-    return map[label] || (matchesMain * 10 + matchesExtra);
-  }
-
   if (game === "primitiva") {
     const map = {
       "Especial (6 + R)": 800,
@@ -950,13 +893,11 @@ async function getNumberStats(game) {
 app.get("/api/health", async (_req, res) => {
   const primitiva = await getCoverage("primitiva");
   const euromillones = await getCoverage("euromillones");
-  const bonoloto = await getCoverage("bonoloto");
   res.json({
     ok: true,
     history: {
       primitiva_draws: primitiva.total_draws,
       euromillones_draws: euromillones.total_draws,
-      bonoloto_draws: bonoloto.total_draws,
       last_sync_at: lastSyncAt
     }
   });
@@ -972,7 +913,6 @@ app.get("/api/stats", async (_req, res) => {
   await syncHistory(false);
   const primitiva = await getCoverage("primitiva");
   const euromillones = await getCoverage("euromillones");
-  const bonoloto = await getCoverage("bonoloto");
   res.json({
     stats: {
       ...stats,
@@ -981,7 +921,6 @@ app.get("/api/stats", async (_req, res) => {
     history: {
       primitiva_draws: primitiva.total_draws,
       euromillones_draws: euromillones.total_draws,
-      bonoloto_draws: bonoloto.total_draws,
       last_sync_at: lastSyncAt
     }
   });
@@ -991,13 +930,11 @@ app.get("/api/history-status", async (_req, res) => {
   await syncHistory(false);
   const primitiva = await getCoverage("primitiva");
   const euromillones = await getCoverage("euromillones");
-  const bonoloto = await getCoverage("bonoloto");
   res.json({
     history: {
       years_back: YEARS_BACK,
       primitiva_draws: primitiva.total_draws,
       euromillones_draws: euromillones.total_draws,
-      bonoloto_draws: bonoloto.total_draws,
       last_sync_at: lastSyncAt,
       sync_log: syncLog,
       source: {
@@ -1013,13 +950,11 @@ app.post("/api/history/refresh", async (_req, res) => {
   await syncHistory(false);
   const primitiva = await getCoverage("primitiva");
   const euromillones = await getCoverage("euromillones");
-  const bonoloto = await getCoverage("bonoloto");
   res.json({
     ok: true,
     history: {
       primitiva_draws: primitiva.total_draws,
       euromillones_draws: euromillones.total_draws,
-      bonoloto_draws: bonoloto.total_draws,
       last_sync_at: lastSyncAt
     }
   });
@@ -1029,14 +964,13 @@ app.get("/api/history-coverage", async (_req, res) => {
   await syncHistory(false);
   res.json({
     primitiva: await getCoverage("primitiva"),
-    euromillones: await getCoverage("euromillones"),
-    bonoloto: await getCoverage("bonoloto")
+    euromillones: await getCoverage("euromillones")
   });
 });
 
 app.get("/api/number-stats", async (req, res) => {
   const game = normalizeGame(req.query.game);
-  if (!["primitiva", "euromillones", "bonoloto"].includes(game)) {
+  if (!["primitiva", "euromillones"].includes(game)) {
     return res.status(400).json({ error: "game requerido" });
   }
 
@@ -1049,7 +983,7 @@ app.get("/api/number-stats", async (req, res) => {
 
 app.get("/api/draws", async (req, res) => {
   const game = normalizeGame(req.query.game);
-  if (!["primitiva", "euromillones", "bonoloto"].includes(game)) {
+  if (!["primitiva", "euromillones"].includes(game)) {
     return res.status(400).json({ error: "game requerido" });
   }
 
@@ -1064,15 +998,13 @@ app.get("/api/draws", async (req, res) => {
     [game, currentWindowStartISO()]
   );
 
-  const hasReintegro = game === "primitiva" || game === "bonoloto";
-
   const draws = rows.map((row) => ({
     game: row.game,
     draw_date: row.draw_date,
     numbers_json: JSON.stringify(row.numbers_json || []),
     stars_json: game === "euromillones" ? JSON.stringify(row.stars_json || []) : null,
-    reintegro: hasReintegro ? row.reintegro ?? null : null,
-    complementary: hasReintegro ? row.complementary ?? null : null
+    reintegro: game === "primitiva" ? row.reintegro ?? null : null,
+    complementary: game === "primitiva" ? row.complementary ?? null : null
   }));
 
   res.json({ draws });
@@ -1099,9 +1031,9 @@ app.get("/api/prize-ranking", async (req, res) => {
       ORDER BY draw_date ASC
     `, [currentWindowStartISO()]);
 
-    const drawsByGame = { primitiva: [], euromillones: [], bonoloto: [] };
+    const drawsByGame = { primitiva: [], euromillones: [] };
     for (const row of allDrawRows) {
-      if (row.game === "primitiva" || row.game === "euromillones" || row.game === "bonoloto") {
+      if (row.game === "primitiva" || row.game === "euromillones") {
         drawsByGame[row.game].push(row);
       }
     }
@@ -1116,7 +1048,7 @@ app.get("/api/prize-ranking", async (req, res) => {
     for (const item of generatedRows) {
       const game = item.game;
       const createdAt = item.created_at;
-      if (!createdAt || !["primitiva", "euromillones", "bonoloto"].includes(game)) continue;
+      if (!createdAt || !["primitiva", "euromillones"].includes(game)) continue;
 
       const created = new Date(createdAt);
 
@@ -1173,7 +1105,7 @@ app.get("/api/prize-ranking", async (req, res) => {
         const drawStars = Array.isArray(row.stars_json) ? row.stars_json.map(Number) : [];
         const numMatches = drawNumbers.filter((n) => genNums.has(n)).length;
 
-        if (game === "primitiva" || game === "bonoloto") {
+        if (game === "primitiva") {
           const reintegroHit =
             genReintegro !== null &&
             row.reintegro != null &&
@@ -1182,9 +1114,7 @@ app.get("/api/prize-ranking", async (req, res) => {
             row.complementary != null &&
             genNums.has(Number(row.complementary));
 
-          const category = game === "bonoloto"
-            ? classifyBonoloto(numMatches, complementaryHit, reintegroHit)
-            : classifyPrimitiva(numMatches, complementaryHit, reintegroHit);
+          const category = classifyPrimitiva(numMatches, complementaryHit, reintegroHit);
 
           if (category) {
             totalHits += 1;
@@ -1286,54 +1216,128 @@ app.get("/api/prize-ranking", async (req, res) => {
 app.post("/api/generate", async (req, res) => {
   const game = normalizeGame(req.body?.game);
   const mode = String(req.body?.mode || "Al azar");
-  const generated = await generateCombination(game, mode);
 
-  if (!generated) {
-    return res.status(400).json({ error: "Juego no válido" });
-  }
+  try {
+    const generated = await generateCombination(game, mode);
 
-  await syncHistory(false);
-  const analysis = await buildAnalysis(game, generated);
-
-  registerStats(game, analysis.historicalSimulation);
-  await registerGeneratedCombination(game, mode, generated, analysis);
-  await saveGeneratedCache();
-
-  res.json({
-    generated: {
-      ...generated,
-      eq: analysis.eq,
-      statScore: analysis.statScore,
-      historicalSimulation: analysis.historicalSimulation,
-      reasons: analysis.reasons
+    if (!generated) {
+      return res.status(400).json({ error: "Juego no válido" });
     }
-  });
+
+    try { await syncHistory(false); } catch (syncErr) {
+      console.error("syncHistory error (ES):", syncErr.message);
+    }
+
+    let analysis;
+    try {
+      analysis = await buildAnalysis(game, generated);
+    } catch (analysisErr) {
+      console.error("buildAnalysis error (ES):", analysisErr.message);
+      analysis = { eq: 75, statScore: 70, historicalSimulation: { window_years: 0, draws_analyzed: 0, winning_draws: 0, breakdown: [], latest_hits: [] }, reasons: [] };
+    }
+
+    try {
+      registerStats(game, analysis.historicalSimulation);
+      await registerGeneratedCombination(game, mode, generated, analysis);
+      await saveGeneratedCache();
+    } catch (dbErr) {
+      console.error("DB write error (ES):", dbErr.message);
+    }
+
+    res.json({
+      generated: {
+        ...generated,
+        eq: analysis.eq,
+        statScore: analysis.statScore,
+        historicalSimulation: analysis.historicalSimulation,
+        reasons: analysis.reasons
+      }
+    });
+  } catch (err) {
+    console.error("generate error (ES):", err);
+    // Fallback: return a random combination so the user always gets numbers
+    const cfg = game === "primitiva"
+      ? { numbers: 6, min: 1, max: 49 }
+      : game === "euromillones"
+      ? { numbers: 5, min: 1, max: 50, stars: 2, starMax: 12 }
+      : null;
+    if (!cfg) return res.status(400).json({ error: "Juego no válido" });
+    const nums = uniqueRandoms(cfg.numbers, cfg.min, cfg.max);
+    const stars = cfg.stars ? uniqueRandoms(cfg.stars, 1, cfg.starMax) : [];
+    const reintegro = game === "primitiva" ? Math.floor(Math.random() * 10) : null;
+    res.json({
+      generated: {
+        numbers: nums, stars, reintegro,
+        eq: 75, statScore: 70,
+        historicalSimulation: { window_years: 0, draws_analyzed: 0, winning_draws: 0, breakdown: [], latest_hits: [] },
+        reasons: ["Combinación generada aleatoriamente (modo emergencia)"],
+        _fallback: true
+      }
+    });
+  }
 });
 
 app.post("/api/generate-smart", async (req, res) => {
   const game = normalizeGame(req.body?.game);
   const mode = String(req.body?.mode || "Radar Loto IA");
-  const generated = await generateCombination(game, mode === "radar_ai" ? "Radar Loto IA" : mode);
 
-  if (!generated) return res.status(400).json({ error: "Juego no válido" });
+  try {
+    const generated = await generateCombination(game, mode === "radar_ai" ? "Radar Loto IA" : mode);
 
-  await syncHistory(false);
-  const analysis = await buildAnalysis(game, generated);
+    if (!generated) return res.status(400).json({ error: "Juego no válido" });
 
-  registerStats(game, analysis.historicalSimulation);
-  await registerGeneratedCombination(game, mode, generated, analysis);
-  await saveGeneratedCache();
-
-  res.json({
-    result: {
-      ...generated,
-      mode: mode === "radar_ai" ? "Radar Loto IA" : mode,
-      eq: analysis.eq,
-      statScore: analysis.statScore,
-      historicalSimulation: analysis.historicalSimulation,
-      reasons: analysis.reasons
+    try { await syncHistory(false); } catch (syncErr) {
+      console.error("syncHistory error (ES smart):", syncErr.message);
     }
-  });
+
+    let analysis;
+    try {
+      analysis = await buildAnalysis(game, generated);
+    } catch (analysisErr) {
+      console.error("buildAnalysis error (ES smart):", analysisErr.message);
+      analysis = { eq: 75, statScore: 70, historicalSimulation: { window_years: 0, draws_analyzed: 0, winning_draws: 0, breakdown: [], latest_hits: [] }, reasons: [] };
+    }
+
+    try {
+      registerStats(game, analysis.historicalSimulation);
+      await registerGeneratedCombination(game, mode, generated, analysis);
+      await saveGeneratedCache();
+    } catch (dbErr) {
+      console.error("DB write error (ES smart):", dbErr.message);
+    }
+
+    res.json({
+      result: {
+        ...generated,
+        mode: mode === "radar_ai" ? "Radar Loto IA" : mode,
+        eq: analysis.eq,
+        statScore: analysis.statScore,
+        historicalSimulation: analysis.historicalSimulation,
+        reasons: analysis.reasons
+      }
+    });
+  } catch (err) {
+    console.error("generate-smart error (ES):", err);
+    const cfg = game === "primitiva"
+      ? { numbers: 6, min: 1, max: 49 }
+      : game === "euromillones"
+      ? { numbers: 5, min: 1, max: 50, stars: 2, starMax: 12 }
+      : null;
+    if (!cfg) return res.status(400).json({ error: "Juego no válido" });
+    const nums = uniqueRandoms(cfg.numbers, cfg.min, cfg.max);
+    const stars = cfg.stars ? uniqueRandoms(cfg.stars, 1, cfg.starMax) : [];
+    const reintegro = game === "primitiva" ? Math.floor(Math.random() * 10) : null;
+    res.json({
+      result: {
+        numbers: nums, stars, reintegro,
+        mode: mode === "radar_ai" ? "Radar Loto IA" : mode,
+        eq: 75, statScore: 70,
+        historicalSimulation: { window_years: 0, draws_analyzed: 0, winning_draws: 0, breakdown: [], latest_hits: [] },
+        reasons: ["Combinación generada aleatoriamente (modo emergencia)"],
+        _fallback: true
+      }
+    });
+  }
 });
 
 app.get("*", (_req, res) => {
