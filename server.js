@@ -97,8 +97,13 @@ const pool = new Pool({
 
 const CSV_URLS = {
   primitiva: process.env.PRIMITIVA_CSV_URL || "https://docs.google.com/spreadsheets/d/e/2PACX-1vTov1BuA0nkVGTS48arpPFkc9cG7B40Xi3BfY6iqcWTrMwCBg5b50-WwvnvaR6mxvFHbDBtYFKg5IsJ/pub?gid=1&output=csv&single=true",
-  euromillones: process.env.EUROMILLONES_CSV_URL || "https://docs.google.com/spreadsheets/d/e/2PACX-1vRy91wfK2JteoMi1ZOhGm0D1RKJfDTbEOj6rfnrB6-X7n2Q1nfFwBZBpcivHRdg3pSwxSQgLA3KpW7v/pub?output=csv"
+  euromillones: process.env.EUROMILLONES_CSV_URL || "https://docs.google.com/spreadsheets/d/e/2PACX-1vRy91wfK2JteoMi1ZOhGm0D1RKJfDTbEOj6rfnrB6-X7n2Q1nfFwBZBpcivHRdg3pSwxSQgLA3KpW7v/pub?output=csv",
+  bonoloto: process.env.BONOLOTO_CSV_URL || "https://docs.google.com/spreadsheets/d/e/2PACX-1vQALTRaLDFfhXOAQmeONPqmFKm9yOiQ4W97rhWgR41BZ7czFsjK5YktD6fnETKHGB9YUnyQ4XBSbhZx/pub?gid=0&single=true&output=csv"
 };
+
+// Juegos de 6 números con complementario y reintegro
+const SIX_NUMBER_GAMES = ["primitiva", "bonoloto"];
+const ES_GAMES = ["primitiva", "euromillones", "bonoloto"];
 
 const stats = {
   total_generated: 0,
@@ -179,6 +184,7 @@ function inHistoryWindow(drawDate) {
 
 function gameConfig(game) {
   if (game === "primitiva") return { numbers: 6, min: 1, max: 49, stars: 0, starMax: 0 };
+  if (game === "bonoloto") return { numbers: 6, min: 1, max: 49, stars: 0, starMax: 0 };
   if (game === "euromillones") return { numbers: 5, min: 1, max: 50, stars: 2, starMax: 12 };
   return null;
 }
@@ -375,7 +381,7 @@ function parseCsvLineForGame(game, line) {
 
   const numberTokens = extractNumbersAfterDate(line, date.original);
 
-  if (game === "primitiva") {
+  if (SIX_NUMBER_GAMES.includes(game)) {
     if (numberTokens.length < 6) return null;
     const numbers = numberTokens.slice(0, 6).sort((a, b) => a - b);
     const extra = numberTokens.slice(6);
@@ -384,13 +390,13 @@ function parseCsvLineForGame(game, line) {
     const reintegro = extra.length ? extra[extra.length - 1] : null;
 
     return {
-      game: "primitiva",
+      game,
       drawDate: date.iso,
       numbers,
       stars: [],
       reintegro: Number.isFinite(reintegro) ? reintegro : null,
       complementary: Number.isFinite(complementary) ? complementary : null,
-      source: "csv_primitiva"
+      source: `csv_${game}`
     };
   }
 
@@ -496,6 +502,9 @@ async function syncHistory(force = false) {
     try { await importHistory("euromillones", startYear, year); }
     catch (err) { logSync(`Error al importar euromillones: ${err.message}`); }
 
+    try { await importHistory("bonoloto", startYear, year); }
+    catch (err) { logSync(`Error al importar bonoloto: ${err.message}`); }
+
     lastSyncAt = new Date().toISOString();
     await saveGeneratedCache();
     logSync("Sincronización histórica ES completada");
@@ -580,6 +589,28 @@ function weightedPick(pool, weights, count) {
   return [...selected].sort((a, b) => a - b);
 }
 
+/**
+ * Ordena el bombo por apariciones (de más a menos si hot, de menos a más si no),
+ * se queda con los `poolSize` primeros y elige `count` al azar entre ellos.
+ */
+function pickByFrequency(pool, freqMap, count, poolSize, hot) {
+  const ranked = [...pool]
+    .map((n) => ({ n, c: freqMap.get(n) || 0, r: Math.random() }))
+    .sort((a, b) => (hot ? b.c - a.c : a.c - b.c) || a.r - b.r)
+    .slice(0, Math.max(count, poolSize))
+    .map((x) => x.n);
+  return uniqueFrom(ranked, count);
+}
+
+function uniqueFrom(list, count) {
+  const copy = [...list];
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy.slice(0, count).sort((a, b) => a - b);
+}
+
 async function generateCombination(game, mode = "Al azar") {
   const cfg = gameConfig(game);
   if (!cfg) return null;
@@ -594,26 +625,20 @@ async function generateCombination(game, mode = "Al azar") {
   let stars = [];
   let reintegro = null;
 
-  if (mode === "Números calientes") {
-    const weights = new Map(pool.map((n) => [n, (numFreq.get(n) || 1) + 1]));
-    numbers = weightedPick(pool, weights, cfg.numbers);
+  if ((mode === "Números calientes" || mode === "Números fríos") && draws.length > 0) {
+    // Calientes: se elige entre los números que MÁS veces han salido.
+    // Fríos: se elige entre los números que MENOS veces han salido.
+    const hot = mode === "Números calientes";
+    numbers = pickByFrequency(pool, numFreq, cfg.numbers, cfg.numbers * 2, hot);
     if (game === "euromillones") {
-      const sWeights = new Map(starPool.map((n) => [n, (starFreq.get(n) || 1) + 1]));
-      stars = weightedPick(starPool, sWeights, cfg.stars);
-    }
-  } else if (mode === "Números fríos") {
-    const weights = new Map(pool.map((n) => [n, (numCold.get(n) || 1) + 1]));
-    numbers = weightedPick(pool, weights, cfg.numbers);
-    if (game === "euromillones") {
-      const sWeights = new Map(starPool.map((n) => [n, (starCold.get(n) || 1) + 1]));
-      stars = weightedPick(starPool, sWeights, cfg.stars);
+      stars = pickByFrequency(starPool, starFreq, cfg.stars, cfg.stars * 2, hot);
     }
   } else {
     numbers = uniqueRandoms(cfg.numbers, cfg.min, cfg.max);
     if (game === "euromillones") stars = uniqueRandoms(cfg.stars, 1, cfg.starMax);
   }
 
-  if (game === "primitiva") reintegro = Math.floor(Math.random() * 10);
+  if (SIX_NUMBER_GAMES.includes(game)) reintegro = Math.floor(Math.random() * 10);
   return { numbers, stars, reintegro };
 }
 
@@ -636,33 +661,35 @@ function maxEndingRepeat(values) {
 
 function calcEquilibrium(game, numbers) {
   const odd = numbers.filter((n) => n % 2 === 1).length;
-  const idealOdd = game === "primitiva" ? 3 : 2;
-  return clamp((game === "primitiva" ? 84 : 82) - Math.abs(idealOdd - odd) * 8, 20, 98);
+  const six = SIX_NUMBER_GAMES.includes(game);
+  const idealOdd = six ? 3 : 2;
+  return clamp((six ? 84 : 82) - Math.abs(idealOdd - odd) * 8, 20, 98);
 }
 
 function calcStatQuality(game, numbers) {
   const sorted = [...numbers].sort((a, b) => a - b);
   const sum = sorted.reduce((a, b) => a + b, 0);
   const odd = sorted.filter((n) => n % 2 === 1).length;
-  const low = sorted.filter((n) => n <= (game === "primitiva" ? 24 : 25)).length;
+  const six = SIX_NUMBER_GAMES.includes(game);
+  const low = sorted.filter((n) => n <= (six ? 24 : 25)).length;
   const consecutive = countConsecutive(sorted);
   const endingRepeat = maxEndingRepeat(sorted);
 
   let score = 78;
-  score -= Math.abs((game === "primitiva" ? 3 : 2) - odd) * 7;
+  score -= Math.abs((six ? 3 : 2) - odd) * 7;
   score -= Math.abs(Math.ceil(sorted.length / 2) - low) * 6;
   score -= consecutive * 10;
   score -= Math.max(0, endingRepeat - 2) * 9;
 
-  const minSum = game === "primitiva" ? 90 : 80;
-  const maxSum = game === "primitiva" ? 190 : 180;
+  const minSum = six ? 90 : 80;
+  const maxSum = six ? 190 : 180;
   if (sum < minSum || sum > maxSum) score -= 12;
 
   return clamp(score, 10, 96);
 }
 
-function classifyPrimitiva(matches, complementaryHit, reintegroHit) {
-  if (matches === 6 && reintegroHit) return "Especial (6 + R)";
+function classifyPrimitiva(matches, complementaryHit, reintegroHit, game = "primitiva") {
+  if (matches === 6 && reintegroHit && game === "primitiva") return "Especial (6 + R)";
   if (matches === 6) return "1ª (6)";
   if (matches === 5 && complementaryHit) return "2ª (5 + C)";
   if (matches === 5) return "3ª (5)";
@@ -702,10 +729,10 @@ async function simulateHistorical(game, generated) {
   for (const draw of draws) {
     const numMatches = draw.numbers.filter((n) => genNums.has(n)).length;
 
-    if (game === "primitiva") {
+    if (SIX_NUMBER_GAMES.includes(game)) {
       const complementaryHit = draw.complementary != null && genNums.has(draw.complementary);
       const reintegroHit = draw.reintegro != null && Number(draw.reintegro) === Number(generated.reintegro);
-      const category = classifyPrimitiva(numMatches, complementaryHit, reintegroHit);
+      const category = classifyPrimitiva(numMatches, complementaryHit, reintegroHit, game);
       if (category) {
         winningDraws += 1;
         breakdownMap[category] = (breakdownMap[category] || 0) + 1;
@@ -970,7 +997,7 @@ app.get("/api/history-coverage", async (_req, res) => {
 
 app.get("/api/number-stats", async (req, res) => {
   const game = normalizeGame(req.query.game);
-  if (!["primitiva", "euromillones"].includes(game)) {
+  if (!ES_GAMES.includes(game)) {
     return res.status(400).json({ error: "game requerido" });
   }
 
@@ -983,7 +1010,7 @@ app.get("/api/number-stats", async (req, res) => {
 
 app.get("/api/draws", async (req, res) => {
   const game = normalizeGame(req.query.game);
-  if (!["primitiva", "euromillones"].includes(game)) {
+  if (!ES_GAMES.includes(game)) {
     return res.status(400).json({ error: "game requerido" });
   }
 
@@ -1003,8 +1030,8 @@ app.get("/api/draws", async (req, res) => {
     draw_date: row.draw_date,
     numbers_json: JSON.stringify(row.numbers_json || []),
     stars_json: game === "euromillones" ? JSON.stringify(row.stars_json || []) : null,
-    reintegro: game === "primitiva" ? row.reintegro ?? null : null,
-    complementary: game === "primitiva" ? row.complementary ?? null : null
+    reintegro: SIX_NUMBER_GAMES.includes(game) ? row.reintegro ?? null : null,
+    complementary: SIX_NUMBER_GAMES.includes(game) ? row.complementary ?? null : null
   }));
 
   res.json({ draws });
@@ -1256,7 +1283,7 @@ app.post("/api/generate", async (req, res) => {
   } catch (err) {
     console.error("generate error (ES):", err);
     // Fallback: return a random combination so the user always gets numbers
-    const cfg = game === "primitiva"
+    const cfg = SIX_NUMBER_GAMES.includes(game)
       ? { numbers: 6, min: 1, max: 49 }
       : game === "euromillones"
       ? { numbers: 5, min: 1, max: 50, stars: 2, starMax: 12 }
@@ -1264,7 +1291,7 @@ app.post("/api/generate", async (req, res) => {
     if (!cfg) return res.status(400).json({ error: "Juego no válido" });
     const nums = uniqueRandoms(cfg.numbers, cfg.min, cfg.max);
     const stars = cfg.stars ? uniqueRandoms(cfg.stars, 1, cfg.starMax) : [];
-    const reintegro = game === "primitiva" ? Math.floor(Math.random() * 10) : null;
+    const reintegro = SIX_NUMBER_GAMES.includes(game) ? Math.floor(Math.random() * 10) : null;
     res.json({
       generated: {
         numbers: nums, stars, reintegro,
@@ -1318,7 +1345,7 @@ app.post("/api/generate-smart", async (req, res) => {
     });
   } catch (err) {
     console.error("generate-smart error (ES):", err);
-    const cfg = game === "primitiva"
+    const cfg = SIX_NUMBER_GAMES.includes(game)
       ? { numbers: 6, min: 1, max: 49 }
       : game === "euromillones"
       ? { numbers: 5, min: 1, max: 50, stars: 2, starMax: 12 }
@@ -1326,7 +1353,7 @@ app.post("/api/generate-smart", async (req, res) => {
     if (!cfg) return res.status(400).json({ error: "Juego no válido" });
     const nums = uniqueRandoms(cfg.numbers, cfg.min, cfg.max);
     const stars = cfg.stars ? uniqueRandoms(cfg.stars, 1, cfg.starMax) : [];
-    const reintegro = game === "primitiva" ? Math.floor(Math.random() * 10) : null;
+    const reintegro = SIX_NUMBER_GAMES.includes(game) ? Math.floor(Math.random() * 10) : null;
     res.json({
       result: {
         numbers: nums, stars, reintegro,
