@@ -611,6 +611,91 @@ function uniqueFrom(list, count) {
   return copy.slice(0, count).sort((a, b) => a - b);
 }
 
+/**
+ * Radar Loto IA: genera muchas candidatas mezclando calientes, fríos y neutros
+ * y se queda con la de estructura más "típica" que además evita los patrones
+ * que juega mucha gente (fechas, series, combinaciones ya premiadas).
+ * No aumenta la probabilidad de acertar; reduce la de compartir premio.
+ */
+const RADAR_AI_CANDIDATES = 600;
+
+function generateRadarAI(game, cfg, draws, numFreq, starFreq) {
+  const pool = Array.from({ length: cfg.max - cfg.min + 1 }, (_, i) => i + cfg.min);
+  const ranked = [...pool].sort((a, b) => (numFreq.get(b) || 0) - (numFreq.get(a) || 0));
+  const hotSet = ranked.slice(0, 12);
+  const coldSet = ranked.slice(-12);
+  const neutral = ranked.slice(12, ranked.length - 12);
+  const nHot = 2;
+  const nCold = 2;
+  const nNeutral = cfg.numbers - nHot - nCold;
+
+  const pastCombos = new Set(draws.map((d) => d.numbers.join("-")));
+  const starPool = Array.from({ length: cfg.starMax }, (_, i) => i + 1);
+
+  let best = null;
+  for (let i = 0; i < RADAR_AI_CANDIDATES; i += 1) {
+    const numbers = [
+      ...uniqueFrom(hotSet, nHot),
+      ...uniqueFrom(coldSet, nCold),
+      ...uniqueFrom(neutral, nNeutral)
+    ].sort((a, b) => a - b);
+    if (new Set(numbers).size !== cfg.numbers) continue;
+
+    const evaluation = evaluateRadarAI(game, numbers, pastCombos);
+    if (!best || evaluation.score > best.score) {
+      best = { numbers, ...evaluation };
+    }
+  }
+
+  let stars = [];
+  if (cfg.stars > 0) {
+    // Una estrella entre las más frecuentes y otra entre el resto, evitando consecutivas.
+    const rankedStars = [...starPool].sort((a, b) => (starFreq.get(b) || 0) - (starFreq.get(a) || 0));
+    for (let i = 0; i < 50; i += 1) {
+      const candidate = [...uniqueFrom(rankedStars.slice(0, 4), 1), ...uniqueFrom(rankedStars.slice(4), cfg.stars - 1)]
+        .sort((a, b) => a - b);
+      stars = candidate;
+      if (countConsecutive(candidate) === 0) break;
+    }
+  }
+
+  return { numbers: best.numbers, stars, highlights: best.highlights };
+}
+
+function evaluateRadarAI(game, numbers, pastCombos) {
+  const six = SIX_NUMBER_GAMES.includes(game);
+  const sum = numbers.reduce((a, b) => a + b, 0);
+  const odd = numbers.filter((n) => n % 2 === 1).length;
+  const even = numbers.length - odd;
+  const decades = new Set(numbers.map((n) => Math.floor((n === 50 ? 49 : n) / 10))).size;
+  const consecutive = countConsecutive(numbers);
+  const above31 = numbers.filter((n) => n > 31).length;
+  const minSum = six ? 100 : 95;
+  const maxSum = six ? 200 : 160;
+  const steps = numbers.slice(1).map((n, i) => n - numbers[i]);
+  const arithmetic = steps.every((d) => d === steps[0]);
+
+  let score = calcStatQuality(game, numbers);
+  if (sum >= minSum && sum <= maxSum) score += 10;
+  if (Math.abs(odd - even) <= (six ? 0 : 1)) score += 6;
+  if (decades >= numbers.length - 1) score += 6;
+  if (consecutive === 0) score += 4;
+  if (above31 >= 2) score += 10;        // evita combinaciones de solo fechas
+  else if (above31 === 1) score += 4;
+  if (arithmetic) score -= 60;          // series tipo 5-10-15-20...
+  if (pastCombos.has(numbers.join("-"))) score -= 100;
+
+  const highlights = [];
+  if (above31 >= 2) highlights.push("Evita las combinaciones de fechas (números > 31 incluidos)");
+  if (sum >= minSum && sum <= maxSum) highlights.push(`Suma ${sum}, dentro del rango más habitual`);
+  if (Math.abs(odd - even) <= 1) highlights.push(`${even} pares y ${odd} impares`);
+  if (decades >= numbers.length - 1) highlights.push("Números repartidos por todas las decenas");
+  highlights.push("Mezcla de 2 números calientes, 2 fríos y el resto neutros");
+  if (!pastCombos.has(numbers.join("-"))) highlights.push("No coincide con ninguna combinación ganadora anterior");
+
+  return { score, highlights };
+}
+
 async function generateCombination(game, mode = "Al azar") {
   const cfg = gameConfig(game);
   if (!cfg) return null;
@@ -624,6 +709,7 @@ async function generateCombination(game, mode = "Al azar") {
   let numbers = [];
   let stars = [];
   let reintegro = null;
+  let highlights = [];
 
   if ((mode === "Números calientes" || mode === "Números fríos") && draws.length > 0) {
     // Calientes: se elige entre los números que MÁS veces han salido.
@@ -633,13 +719,18 @@ async function generateCombination(game, mode = "Al azar") {
     if (game === "euromillones") {
       stars = pickByFrequency(starPool, starFreq, cfg.stars, cfg.stars * 2, hot);
     }
+  } else if (mode === "Radar Loto IA" && draws.length > 0) {
+    const best = generateRadarAI(game, cfg, draws, numFreq, starFreq);
+    numbers = best.numbers;
+    stars = best.stars;
+    highlights = best.highlights;
   } else {
     numbers = uniqueRandoms(cfg.numbers, cfg.min, cfg.max);
     if (game === "euromillones") stars = uniqueRandoms(cfg.stars, 1, cfg.starMax);
   }
 
   if (SIX_NUMBER_GAMES.includes(game)) reintegro = Math.floor(Math.random() * 10);
-  return { numbers, stars, reintegro };
+  return highlights.length ? { numbers, stars, reintegro, highlights } : { numbers, stars, reintegro };
 }
 
 function countConsecutive(values) {
@@ -771,6 +862,7 @@ async function buildAnalysis(game, generated) {
     statScore: statQuality,
     historicalSimulation,
     reasons: [
+      ...(generated.highlights || []),
       `Equilibrio: ${equilibrium} / 100`,
       `Calidad estadística: ${statQuality} / 100`,
       `Simulación histórica (${historicalSimulation.window_years} años): ${historicalSimulation.winning_draws} sorteos con premio`
