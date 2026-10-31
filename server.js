@@ -507,6 +507,26 @@ function eurojackpotDrawDates(fromIso, toDate) {
   return dates;
 }
 
+async function fetchOnceHtml(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12000);
+  try {
+    const res = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36 RadarLoto/1.0 (+https://radarloto.com)",
+        "accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
+        "accept-language": "es-ES,es;q=0.9"
+      }
+    });
+    if (res.status === 404) return { status: 404, html: "" };
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return { status: res.status, html: await res.text() };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function parseOnceEurojackpot(html, drawDate) {
   const m = html.match(/class="ocu">\s*N[úu]meros:\s*([\d,\s]+)\.\s*Soles:\s*([\d,\s]+)\./i);
   if (!m) return null;
@@ -528,24 +548,32 @@ async function syncEurojackpotFromOnce() {
       .filter((d) => !have.has(d))
       .filter((d) => d >= recentLimit || !eurojackpotMissing.has(d));
 
+    if (pending.length) logSync(`eurojackpot: consultando ${pending.length} fechas en ONCE`);
     let added = 0;
+    let errors = 0;
+    let lastError = null;
     for (const iso of pending) {
       const [y, mo, day] = iso.split("-").map(Number);
       const url = `https://www.juegosonce.es/resultados-eurojackpot-${day}-${MONTHS_ES[mo - 1]}-${y}`;
       try {
-        const draw = parseOnceEurojackpot(await fetchText(url), iso);
+        const { status, html } = await fetchOnceHtml(url);
+        const draw = status === 404 ? null : parseOnceEurojackpot(html, iso);
         if (draw) {
           await upsertDraw(draw);
           added += 1;
         } else {
-          eurojackpotMissing.add(iso);
+          eurojackpotMissing.add(iso); // 404: aún no publicado o no hubo sorteo
         }
-      } catch {
-        eurojackpotMissing.add(iso); // 404: aún no publicado o no hubo sorteo
+      } catch (err) {
+        errors += 1;
+        lastError = err.name === "AbortError" ? "timeout" : err.message;
+        if (errors === 1) logSync(`eurojackpot: primer error en ONCE (${iso}): ${lastError}`);
+        // 5 errores seguidos sin ningún acierto: ONCE no responde, se reintenta en la próxima sincronización
+        if (errors >= 5 && added === 0) break;
       }
       await new Promise((r) => setTimeout(r, ONCE_REQUEST_DELAY_MS));
     }
-    if (pending.length) logSync(`eurojackpot: ${added} sorteos nuevos desde ONCE (${pending.length} fechas consultadas)`);
+    if (pending.length) logSync(`eurojackpot: ${added} sorteos nuevos desde ONCE, ${errors} errores${lastError ? ` (último: ${lastError})` : ""}`);
   } finally {
     eurojackpotSyncRunning = false;
   }
@@ -762,7 +790,7 @@ function evaluateRadarAI(game, numbers, pastCombos) {
   if (Math.abs(odd - even) <= 1) highlights.push(`${even} pares y ${odd} impares`);
   if (decades >= numbers.length - 1) highlights.push("Números repartidos por todas las decenas");
   highlights.push("Mezcla de 2 números calientes, 2 fríos y el resto neutros");
-  if (!pastCombos.has(numbers.join("-"))) highlights.push("No coincide con ninguna combinación ganadora anterior");
+  if (!pastCombos.has(numbers.join("-"))) highlights.push("Nunca ha salido completa como combinación ganadora (1ª categoría)");
 
   return { score, highlights };
 }
