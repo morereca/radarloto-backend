@@ -103,7 +103,14 @@ const CSV_URLS = {
 
 // Juegos de 6 números con complementario y reintegro
 const SIX_NUMBER_GAMES = ["primitiva", "bonoloto"];
-const ES_GAMES = ["primitiva", "euromillones", "bonoloto"];
+// Juegos de 5 números + 2 estrellas/soles
+const STAR_GAMES = ["euromillones", "eurojackpot"];
+const ES_GAMES = ["primitiva", "euromillones", "bonoloto", "eurojackpot"];
+
+// EuroJackpot: resultados oficiales de la ONCE. Su robots.txt solo permite
+// leer automáticamente los sorteos desde 2025, así que empezamos ahí.
+const EUROJACKPOT_START = process.env.EUROJACKPOT_START || "2025-01-01";
+const ONCE_REQUEST_DELAY_MS = 400;
 
 const stats = {
   total_generated: 0,
@@ -185,6 +192,7 @@ function inHistoryWindow(drawDate) {
 function gameConfig(game) {
   if (game === "primitiva") return { numbers: 6, min: 1, max: 49, stars: 0, starMax: 0 };
   if (game === "bonoloto") return { numbers: 6, min: 1, max: 49, stars: 0, starMax: 0 };
+  if (game === "eurojackpot") return { numbers: 5, min: 1, max: 50, stars: 2, starMax: 12 };
   if (game === "euromillones") return { numbers: 5, min: 1, max: 50, stars: 2, starMax: 12 };
   return null;
 }
@@ -483,6 +491,66 @@ function startAutoSync() {
   logSync(`Auto-sync ES activado cada ${Math.max(5, AUTO_SYNC_INTERVAL_MINUTES)} minutos`);
 }
 
+const MONTHS_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+const eurojackpotMissing = new Set(); // fechas sin sorteo ya consultadas (se reintentan tras reiniciar)
+let eurojackpotSyncRunning = false;
+
+function eurojackpotDrawDates(fromIso, toDate) {
+  // Sorteos martes (2) y viernes (5)
+  const dates = [];
+  const d = new Date(`${fromIso}T12:00:00Z`);
+  while (d <= toDate) {
+    const day = d.getUTCDay();
+    if (day === 2 || day === 5) dates.push(d.toISOString().slice(0, 10));
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  return dates;
+}
+
+function parseOnceEurojackpot(html, drawDate) {
+  const m = html.match(/class="ocu">\s*N[úu]meros:\s*([\d,\s]+)\.\s*Soles:\s*([\d,\s]+)\./i);
+  if (!m) return null;
+  const numbers = m[1].split(",").map((x) => Number(x.trim())).filter(Number.isFinite).sort((a, b) => a - b);
+  const stars = m[2].split(",").map((x) => Number(x.trim())).filter(Number.isFinite).sort((a, b) => a - b);
+  if (numbers.length !== 5 || stars.length !== 2) return null;
+  return { game: "eurojackpot", drawDate, numbers, stars, reintegro: null, complementary: null, source: "once" };
+}
+
+async function syncEurojackpotFromOnce() {
+  if (eurojackpotSyncRunning) return;
+  eurojackpotSyncRunning = true;
+  try {
+    const { rows } = await query(`SELECT draw_date::text AS d FROM es_draws WHERE game = 'eurojackpot'`);
+    const have = new Set(rows.map((r) => r.d));
+    const now = new Date();
+    const recentLimit = new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+    const pending = eurojackpotDrawDates(EUROJACKPOT_START, now)
+      .filter((d) => !have.has(d))
+      .filter((d) => d >= recentLimit || !eurojackpotMissing.has(d));
+
+    let added = 0;
+    for (const iso of pending) {
+      const [y, mo, day] = iso.split("-").map(Number);
+      const url = `https://www.juegosonce.es/resultados-eurojackpot-${day}-${MONTHS_ES[mo - 1]}-${y}`;
+      try {
+        const draw = parseOnceEurojackpot(await fetchText(url), iso);
+        if (draw) {
+          await upsertDraw(draw);
+          added += 1;
+        } else {
+          eurojackpotMissing.add(iso);
+        }
+      } catch {
+        eurojackpotMissing.add(iso); // 404: aún no publicado o no hubo sorteo
+      }
+      await new Promise((r) => setTimeout(r, ONCE_REQUEST_DELAY_MS));
+    }
+    if (pending.length) logSync(`eurojackpot: ${added} sorteos nuevos desde ONCE (${pending.length} fechas consultadas)`);
+  } finally {
+    eurojackpotSyncRunning = false;
+  }
+}
+
 async function syncHistory(force = false) {
   if (!shouldSyncNow(force)) return;
   if (syncPromise) {
@@ -504,6 +572,9 @@ async function syncHistory(force = false) {
 
     try { await importHistory("bonoloto", startYear, year); }
     catch (err) { logSync(`Error al importar bonoloto: ${err.message}`); }
+
+    // En segundo plano: la primera carga lee ~190 páginas y no debe bloquear las peticiones.
+    syncEurojackpotFromOnce().catch((err) => logSync(`Error al importar eurojackpot: ${err.message}`));
 
     lastSyncAt = new Date().toISOString();
     await saveGeneratedCache();
@@ -545,7 +616,7 @@ function buildFrequencyMapsFromDraws(game, draws) {
       numFreq.set(n, (numFreq.get(n) || 0) + 1);
       lastSeen.set(n, i);
     }
-    if (game === "euromillones") {
+    if (STAR_GAMES.includes(game)) {
       for (const s of draw.stars || []) {
         starFreq.set(s, (starFreq.get(s) || 0) + 1);
         starLastSeen.set(s, i);
@@ -562,7 +633,7 @@ function buildFrequencyMapsFromDraws(game, draws) {
     numCold.set(n, lastIndex - seenAt);
   }
 
-  if (game === "euromillones") {
+  if (STAR_GAMES.includes(game)) {
     for (let s = 1; s <= cfg.starMax; s += 1) {
       const seenAt = starLastSeen.has(s) ? starLastSeen.get(s) : -9999;
       starCold.set(s, lastIndex - seenAt);
@@ -716,7 +787,7 @@ async function generateCombination(game, mode = "Al azar") {
     // Fríos: se elige entre los números que MENOS veces han salido.
     const hot = mode === "Números calientes";
     numbers = pickByFrequency(pool, numFreq, cfg.numbers, cfg.numbers * 2, hot);
-    if (game === "euromillones") {
+    if (STAR_GAMES.includes(game)) {
       stars = pickByFrequency(starPool, starFreq, cfg.stars, cfg.stars * 2, hot);
     }
   } else if (mode === "Radar Loto IA" && draws.length > 0) {
@@ -726,7 +797,7 @@ async function generateCombination(game, mode = "Al azar") {
     highlights = best.highlights;
   } else {
     numbers = uniqueRandoms(cfg.numbers, cfg.min, cfg.max);
-    if (game === "euromillones") stars = uniqueRandoms(cfg.stars, 1, cfg.starMax);
+    if (STAR_GAMES.includes(game)) stars = uniqueRandoms(cfg.stars, 1, cfg.starMax);
   }
 
   if (SIX_NUMBER_GAMES.includes(game)) reintegro = Math.floor(Math.random() * 10);
@@ -809,6 +880,24 @@ function classifyEuromillones(numMatches, starMatches) {
   return table[`${numMatches}+${starMatches}`] || null;
 }
 
+function classifyEurojackpot(numMatches, starMatches) {
+  const table = {
+    "5+2": "1ª (5 + 2)",
+    "5+1": "2ª (5 + 1)",
+    "5+0": "3ª (5 + 0)",
+    "4+2": "4ª (4 + 2)",
+    "4+1": "5ª (4 + 1)",
+    "4+0": "6ª (4 + 0)",
+    "3+2": "7ª (3 + 2)",
+    "2+2": "8ª (2 + 2)",
+    "3+1": "9ª (3 + 1)",
+    "3+0": "10ª (3 + 0)",
+    "1+2": "11ª (1 + 2)",
+    "2+1": "12ª (2 + 1)"
+  };
+  return table[`${numMatches}+${starMatches}`] || null;
+}
+
 async function simulateHistorical(game, generated) {
   const draws = await getAllDrawRows(game);
   const genNums = new Set(generated.numbers);
@@ -831,7 +920,9 @@ async function simulateHistorical(game, generated) {
       }
     } else {
       const starMatches = (draw.stars || []).filter((s) => genStars.has(s)).length;
-      const category = classifyEuromillones(numMatches, starMatches);
+      const category = game === "eurojackpot"
+        ? classifyEurojackpot(numMatches, starMatches)
+        : classifyEuromillones(numMatches, starMatches);
       if (category) {
         winningDraws += 1;
         breakdownMap[category] = (breakdownMap[category] || 0) + 1;
@@ -986,11 +1077,11 @@ async function getNumberStats(game) {
     .map((number) => ({ number, gap: numCold.get(number) || 0, count: numFreq.get(number) || 0 }))
     .sort((a, b) => b.gap - a.gap || a.number - b.number);
 
-  const hotExtra = game === "euromillones"
+  const hotExtra = STAR_GAMES.includes(game)
     ? [...starFreq.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0]).map(([number, count]) => ({ number, count }))
     : [];
 
-  const coldExtra = game === "euromillones"
+  const coldExtra = STAR_GAMES.includes(game)
     ? Array.from({ length: cfg.starMax }, (_, i) => i + 1)
         .map((number) => ({ number, gap: starCold.get(number) || 0, count: starFreq.get(number) || 0 }))
         .sort((a, b) => b.gap - a.gap || a.number - b.number)
@@ -1005,7 +1096,7 @@ async function getNumberStats(game) {
     hot_extra: hotExtra.slice(0, 6),
     cold_extra: coldExtra.slice(0, 6),
     main_counts: mapCounts(numFreq),
-    extra_counts: game === "euromillones" ? mapCounts(starFreq) : {}
+    extra_counts: STAR_GAMES.includes(game) ? mapCounts(starFreq) : {}
   };
 }
 
@@ -1121,7 +1212,7 @@ app.get("/api/draws", async (req, res) => {
     game: row.game,
     draw_date: row.draw_date,
     numbers_json: JSON.stringify(row.numbers_json || []),
-    stars_json: game === "euromillones" ? JSON.stringify(row.stars_json || []) : null,
+    stars_json: STAR_GAMES.includes(game) ? JSON.stringify(row.stars_json || []) : null,
     reintegro: SIX_NUMBER_GAMES.includes(game) ? row.reintegro ?? null : null,
     complementary: SIX_NUMBER_GAMES.includes(game) ? row.complementary ?? null : null
   }));
@@ -1377,7 +1468,7 @@ app.post("/api/generate", async (req, res) => {
     // Fallback: return a random combination so the user always gets numbers
     const cfg = SIX_NUMBER_GAMES.includes(game)
       ? { numbers: 6, min: 1, max: 49 }
-      : game === "euromillones"
+      : STAR_GAMES.includes(game)
       ? { numbers: 5, min: 1, max: 50, stars: 2, starMax: 12 }
       : null;
     if (!cfg) return res.status(400).json({ error: "Juego no válido" });
@@ -1439,7 +1530,7 @@ app.post("/api/generate-smart", async (req, res) => {
     console.error("generate-smart error (ES):", err);
     const cfg = SIX_NUMBER_GAMES.includes(game)
       ? { numbers: 6, min: 1, max: 49 }
-      : game === "euromillones"
+      : STAR_GAMES.includes(game)
       ? { numbers: 5, min: 1, max: 50, stars: 2, starMax: 12 }
       : null;
     if (!cfg) return res.status(400).json({ error: "Juego no válido" });
