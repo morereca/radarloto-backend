@@ -107,10 +107,10 @@ const SIX_NUMBER_GAMES = ["primitiva", "bonoloto"];
 const STAR_GAMES = ["euromillones", "eurojackpot"];
 const ES_GAMES = ["primitiva", "euromillones", "bonoloto", "eurojackpot"];
 
-// EuroJackpot: resultados oficiales de la ONCE. Su robots.txt solo permite
-// leer automáticamente los sorteos desde 2025, así que empezamos ahí.
-const EUROJACKPOT_START = process.env.EUROJACKPOT_START || "2025-01-01";
-const ONCE_REQUEST_DELAY_MS = 400;
+// EuroJackpot: resultados oficiales desde la API pública de LOTTO.de (Alemania).
+// La ONCE bloquea las peticiones desde servidores; el robots.txt de lotto.de lo permite todo.
+const LOTTO_DE_API = "https://www.lotto.de/api/stats/entities.eurojackpot";
+const LOTTO_DE_DELAY_MS = 250;
 
 const stats = {
   total_generated: 0,
@@ -491,89 +491,101 @@ function startAutoSync() {
   logSync(`Auto-sync ES activado cada ${Math.max(5, AUTO_SYNC_INTERVAL_MINUTES)} minutos`);
 }
 
-const MONTHS_ES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
-const eurojackpotMissing = new Set(); // fechas sin sorteo ya consultadas (se reintentan tras reiniciar)
+const eurojackpotMissing = new Set(); // fechas consultadas sin resultado (se reintentan tras reiniciar)
 let eurojackpotSyncRunning = false;
 
-function eurojackpotDrawDates(fromIso, toDate) {
-  // Sorteos martes (2) y viernes (5)
-  const dates = [];
-  const d = new Date(`${fromIso}T12:00:00Z`);
-  while (d <= toDate) {
-    const day = d.getUTCDay();
-    if (day === 2 || day === 5) dates.push(d.toISOString().slice(0, 10));
-    d.setUTCDate(d.getUTCDate() + 1);
-  }
-  return dates;
-}
-
-async function fetchOnceHtml(url) {
+async function fetchLottoDeJson(path) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 12000);
   try {
-    const res = await fetch(url, {
+    const res = await fetch(`${LOTTO_DE_API}${path}`, {
       signal: controller.signal,
       headers: {
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36 RadarLoto/1.0 (+https://radarloto.com)",
-        "accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8",
-        "accept-language": "es-ES,es;q=0.9"
+        "user-agent": "Mozilla/5.0 (compatible; RadarLotoBot/1.0; +https://radarloto.com)",
+        "accept": "application/json"
       }
     });
-    if (res.status === 404) return { status: 404, html: "" };
+    if (res.status === 404) return null;
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return { status: res.status, html: await res.text() };
+    return await res.json();
   } finally {
     clearTimeout(timeout);
   }
 }
 
-function parseOnceEurojackpot(html, drawDate) {
-  const m = html.match(/class="ocu">\s*N[úu]meros:\s*([\d,\s]+)\.\s*Soles:\s*([\d,\s]+)\./i);
-  if (!m) return null;
-  const numbers = m[1].split(",").map((x) => Number(x.trim())).filter(Number.isFinite).sort((a, b) => a - b);
-  const stars = m[2].split(",").map((x) => Number(x.trim())).filter(Number.isFinite).sort((a, b) => a - b);
-  if (numbers.length !== 5 || stars.length !== 2) return null;
-  return { game: "eurojackpot", drawDate, numbers, stars, reintegro: null, complementary: null, source: "once" };
+/** La API identifica cada sorteo por la medianoche (hora de Berlín) del día, en milisegundos. */
+function berlinMidnightMs(iso) {
+  const [y, m, d] = iso.split("-").map(Number);
+  const fmt = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Berlin", hour: "2-digit", hour12: false });
+  for (const offsetHours of [1, 2]) {
+    const ms = Date.UTC(y, m - 1, d) - offsetHours * 3600 * 1000;
+    if (fmt.format(new Date(ms)) === "00") return ms;
+  }
+  return Date.UTC(y, m - 1, d) - 3600 * 1000;
 }
 
-async function syncEurojackpotFromOnce() {
+function parseLottoDeDraw(json, drawDate) {
+  const items = Array.isArray(json?.drawNumbersCollection) ? json.drawNumbersCollection : [];
+  const pick = (type) => items
+    .filter((x) => x?.drawNumberType === type && Number.isFinite(Number(x?.drawNumber)))
+    .map((x) => Number(x.drawNumber))
+    .sort((a, b) => a - b);
+  const numbers = pick(0);
+  const stars = pick(1);
+  if (numbers.length !== 5 || stars.length !== 2) return null;
+  return { game: "eurojackpot", drawDate, numbers, stars, reintegro: null, complementary: null, source: "lotto.de" };
+}
+
+async function syncEurojackpot() {
   if (eurojackpotSyncRunning) return;
   eurojackpotSyncRunning = true;
   try {
+    const windowStart = currentWindowStartISO();
+    const firstYear = Number(windowStart.slice(0, 4));
+    const thisYear = new Date().getUTCFullYear();
+
+    // 1) Fechas de sorteo de cada año. La API devuelve los sorteos del año hasta la fecha
+    //    indicada, así que se pide con el 31 de diciembre para tener el año entero.
+    const dates = [];
+    for (let year = firstYear; year <= thisYear; year += 1) {
+      const json = await fetchLottoDeJson(`/history/${Date.UTC(year, 11, 31, 12)}`);
+      for (const day of json?.days || []) {
+        if (typeof day?.date === "string" && day.date >= windowStart) dates.push(day.date);
+      }
+      await new Promise((r) => setTimeout(r, LOTTO_DE_DELAY_MS));
+    }
+
+    // 2) Solo las que faltan en la base de datos
     const { rows } = await query(`SELECT draw_date::text AS d FROM es_draws WHERE game = 'eurojackpot'`);
     const have = new Set(rows.map((r) => r.d));
-    const now = new Date();
-    const recentLimit = new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
-    const pending = eurojackpotDrawDates(EUROJACKPOT_START, now)
-      .filter((d) => !have.has(d))
-      .filter((d) => d >= recentLimit || !eurojackpotMissing.has(d));
+    const pending = [...new Set(dates)].filter((d) => !have.has(d) && !eurojackpotMissing.has(d)).sort();
+    if (!pending.length) return;
 
-    if (pending.length) logSync(`eurojackpot: consultando ${pending.length} fechas en ONCE`);
+    logSync(`eurojackpot: importando ${pending.length} sorteos desde lotto.de`);
     let added = 0;
     let errors = 0;
     let lastError = null;
     for (const iso of pending) {
-      const [y, mo, day] = iso.split("-").map(Number);
-      const url = `https://www.juegosonce.es/resultados-eurojackpot-${day}-${MONTHS_ES[mo - 1]}-${y}`;
       try {
-        const { status, html } = await fetchOnceHtml(url);
-        const draw = status === 404 ? null : parseOnceEurojackpot(html, iso);
+        const draw = parseLottoDeDraw(await fetchLottoDeJson(`/draw/${berlinMidnightMs(iso)}`), iso);
         if (draw) {
           await upsertDraw(draw);
           added += 1;
         } else {
-          eurojackpotMissing.add(iso); // 404: aún no publicado o no hubo sorteo
+          eurojackpotMissing.add(iso);
         }
       } catch (err) {
         errors += 1;
         lastError = err.name === "AbortError" ? "timeout" : err.message;
-        if (errors === 1) logSync(`eurojackpot: primer error en ONCE (${iso}): ${lastError}`);
-        // 5 errores seguidos sin ningún acierto: ONCE no responde, se reintenta en la próxima sincronización
+        if (errors === 1) logSync(`eurojackpot: primer error en lotto.de (${iso}): ${lastError}`);
+        // 5 errores sin ningún acierto: la fuente no responde; se reintenta en la próxima sincronización
         if (errors >= 5 && added === 0) break;
       }
-      await new Promise((r) => setTimeout(r, ONCE_REQUEST_DELAY_MS));
+      await new Promise((r) => setTimeout(r, LOTTO_DE_DELAY_MS));
     }
-    if (pending.length) logSync(`eurojackpot: ${added} sorteos nuevos desde ONCE, ${errors} errores${lastError ? ` (último: ${lastError})` : ""}`);
+    logSync(`eurojackpot: ${added} sorteos nuevos desde lotto.de, ${errors} errores${lastError ? ` (último: ${lastError})` : ""}`);
+  } catch (err) {
+    logSync(`eurojackpot: error al leer el calendario de lotto.de: ${err.message}`);
   } finally {
     eurojackpotSyncRunning = false;
   }
@@ -601,8 +613,8 @@ async function syncHistory(force = false) {
     try { await importHistory("bonoloto", startYear, year); }
     catch (err) { logSync(`Error al importar bonoloto: ${err.message}`); }
 
-    // En segundo plano: la primera carga lee ~190 páginas y no debe bloquear las peticiones.
-    syncEurojackpotFromOnce().catch((err) => logSync(`Error al importar eurojackpot: ${err.message}`));
+    // En segundo plano: la primera carga lee ~800 sorteos y no debe bloquear las peticiones.
+    syncEurojackpot().catch((err) => logSync(`Error al importar eurojackpot: ${err.message}`));
 
     lastSyncAt = new Date().toISOString();
     await saveGeneratedCache();
